@@ -1,0 +1,283 @@
+
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    environment {
+        EC2_HOST = '43.204.3.21'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build React Frontend') {
+            steps {
+                dir('frontend') {
+                    sh 'npm ci'
+                    sh 'npm run build'
+                }
+            }
+        }
+
+        stage('Validate Backend') {
+            steps {
+                dir('backend') {
+                    sh '''
+                        set -e
+                        python3 -m py_compile main.py
+                        test -f main.py
+                        echo "Backend validation passed."
+                    '''
+                }
+            }
+        }
+
+        stage('Archive Build') {
+            steps {
+                archiveArtifacts artifacts: 'frontend/dist/**,backend/main.py',
+                                 fingerprint: true
+            }
+        }
+
+        stage('Manual Approval') {
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: 'CI checks passed. Deploy Huda AI to production EC2?',
+                        ok: 'Approve Production Deployment'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy to EC2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'ec2-deploy-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        REMOTE_STAGE="/tmp/huda-ai-release-${BUILD_NUMBER}"
+
+                        SSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
+                        SCP="scp -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
+
+                        echo "Preparing remote staging directory..."
+
+                        $SSH "$SSH_USER@$EC2_HOST" \
+                            "mkdir -p $REMOTE_STAGE"
+
+                        echo "Transferring React build..."
+
+                        $SCP -r frontend/dist \
+                            "$SSH_USER@$EC2_HOST:$REMOTE_STAGE/"
+
+                        echo "Transferring backend source..."
+
+                        $SCP backend/main.py \
+                            "$SSH_USER@$EC2_HOST:$REMOTE_STAGE/"
+
+                        echo "Starting production deployment..."
+
+                        $SSH "$SSH_USER@$EC2_HOST" \
+                            "sudo bash -s -- '$BUILD_NUMBER'" <<'REMOTE_SCRIPT'
+
+                        set -Eeuo pipefail
+
+                        BUILD_ID="$1"
+
+                        APP="/huda-ai"
+                        STAGE="/tmp/huda-ai-release-$BUILD_ID"
+                        BACKUP_DIR="/var/backups/huda-ai"
+                        NEW_DIST="$APP/frontend/dist.new-$BUILD_ID"
+                        OLD_DIST="$APP/frontend/dist.old-$BUILD_ID"
+
+                        BACKUP="$BACKUP_DIR/deploy-$BUILD_ID-$(date +%Y%m%d-%H%M%S).tar.gz"
+
+                        echo "Checking production files..."
+
+                        test -f "$STAGE/main.py"
+                        test -f "$STAGE/dist/index.html"
+                        test -f "$APP/backend/.env"
+                        test -x "$APP/backend/venv/bin/python"
+
+                        AVAILABLE_MB=$(df -Pm / | awk 'NR==2 {print $4}')
+
+                        if [ "$AVAILABLE_MB" -lt 300 ]; then
+                            echo "Not enough disk space for deployment."
+                            exit 1
+                        fi
+
+                        echo "Checking backend with production Python..."
+
+                        "$APP/backend/venv/bin/python" \
+                            -m py_compile "$STAGE/main.py"
+
+                        mkdir -p "$BACKUP_DIR"
+                        chmod 700 "$BACKUP_DIR"
+
+                        echo "Creating production backup..."
+
+                        tar -czf "$BACKUP" \
+                            -C "$APP" \
+                            backend/main.py \
+                            frontend/dist
+
+                        chmod 600 "$BACKUP"
+
+                        tar -tzf "$BACKUP" >/dev/null
+
+                        echo "Backup verified: $BACKUP"
+
+                        echo "Preparing new frontend..."
+
+                        rm -rf "$NEW_DIST"
+
+                        cp -a "$STAGE/dist" "$NEW_DIST"
+
+                        chown -R root:root "$NEW_DIST"
+
+                        echo "Deploying application files..."
+
+                        rollback() {
+                            STATUS=$?
+                            trap - ERR
+                            set +e
+
+                            echo "Deployment failed. Rolling back..."
+
+                            rm -rf "$APP/frontend/dist"
+
+                            tar -xzf "$BACKUP" -C "$APP"
+
+                            systemctl restart huda-ai.service
+
+                            sleep 3
+
+                            curl -fsS \
+                                http://127.0.0.1:8000/api/health
+
+                            rm -rf "$NEW_DIST"
+                            rm -rf "$OLD_DIST"
+                            rm -rf "$STAGE"
+
+                            echo "Rollback completed."
+
+                            exit "$STATUS"
+                        }
+
+                        trap rollback ERR
+
+                        mv "$APP/frontend/dist" "$OLD_DIST"
+
+                        mv "$NEW_DIST" "$APP/frontend/dist"
+
+                        install -o root -g root -m 0644 \
+                            "$STAGE/main.py" \
+                            "$APP/backend/main.py"
+
+                        echo "Restarting FastAPI..."
+
+                        systemctl restart huda-ai.service
+
+                        sleep 3
+
+                        echo "Checking backend health..."
+
+                        curl -fsS \
+                            http://127.0.0.1:8000/api/health
+
+                        echo
+                        echo "Production backend is healthy."
+
+echo "Checking public chat website..."
+CHAT_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+    https://chat.hudamusthafa.tech)
+
+test "$CHAT_STATUS" = "200"
+
+echo "Chat website: HTTP $CHAT_STATUS"
+
+echo "Checking public agents website..."
+AGENTS_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+    https://agents.hudamusthafa.tech)
+
+test "$AGENTS_STATUS" = "200"
+
+echo "Agents website: HTTP $AGENTS_STATUS"
+
+trap - ERR
+                        
+
+                        rm -rf "$OLD_DIST"
+                        rm -rf "$STAGE"
+
+                        echo "Deployment completed successfully."
+                        echo "Backup available at: $BACKUP"
+
+                        REMOTE_SCRIPT
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Production Websites') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking backend..."
+
+                    curl -fsS \
+                        https://chat.hudamusthafa.tech/api/health
+
+                    echo
+
+                    echo "Checking chat website..."
+
+                    curl -fsS -o /dev/null \
+                        -w "Chat HTTP: %{http_code}\\n" \
+                        https://chat.hudamusthafa.tech
+
+                    echo "Checking agents website..."
+
+                    curl -fsS -o /dev/null \
+                        -w "Agents HTTP: %{http_code}\\n" \
+                        https://agents.hudamusthafa.tech
+
+                    echo "Production verification completed."
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Huda AI production deployment completed successfully!'
+        }
+
+        failure {
+            echo 'Deployment failed. Check the Jenkins console output and EC2 backup.'
+        }
+
+        always {
+            echo 'Deployment pipeline finished.'
+        }
+    }
+}
+
