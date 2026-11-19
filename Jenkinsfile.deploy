@@ -4,6 +4,7 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
+        skipDefaultCheckout(true)
         timestamps()
         timeout(time: 45, unit: 'MINUTES')
     }
@@ -44,8 +45,10 @@ pipeline {
 
         stage('Archive Build') {
             steps {
-                archiveArtifacts artifacts: 'frontend/dist/**,backend/main.py',
-                                 fingerprint: true
+                archiveArtifacts(
+                    artifacts: 'frontend/dist/**,backend/main.py',
+                    fingerprint: true
+                )
             }
         }
 
@@ -74,194 +77,216 @@ pipeline {
 
                         REMOTE_STAGE="/tmp/huda-ai-release-${BUILD_NUMBER}"
 
-                        SSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
-                        SCP="scp -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
-
                         echo "Preparing remote staging directory..."
 
-                        $SSH "$SSH_USER@$EC2_HOST" \
-                            "mkdir -p $REMOTE_STAGE"
+                        ssh -i "$SSH_KEY" \
+                            -o IdentitiesOnly=yes \
+                            -o BatchMode=yes \
+                            "$SSH_USER@$EC2_HOST" \
+                            "mkdir -p '$REMOTE_STAGE'"
 
                         echo "Transferring React build..."
 
-                        $SCP -r frontend/dist \
+                        scp -r -i "$SSH_KEY" \
+                            -o IdentitiesOnly=yes \
+                            -o BatchMode=yes \
+                            frontend/dist \
                             "$SSH_USER@$EC2_HOST:$REMOTE_STAGE/"
 
                         echo "Transferring backend source..."
 
-                        $SCP backend/main.py \
+                        scp -i "$SSH_KEY" \
+                            -o IdentitiesOnly=yes \
+                            -o BatchMode=yes \
+                            backend/main.py \
                             "$SSH_USER@$EC2_HOST:$REMOTE_STAGE/"
 
                         echo "Starting production deployment..."
 
-                        $SSH "$SSH_USER@$EC2_HOST" \
+                        ssh -i "$SSH_KEY" \
+                            -o IdentitiesOnly=yes \
+                            -o BatchMode=yes \
+                            "$SSH_USER@$EC2_HOST" \
                             "sudo bash -s -- '$BUILD_NUMBER'" <<'REMOTE_SCRIPT'
 
-                        set -Eeuo pipefail
+set -Eeuo pipefail
 
-                        BUILD_ID="$1"
+BUILD_ID="$1"
 
-                        APP="/huda-ai"
-                        STAGE="/tmp/huda-ai-release-$BUILD_ID"
-                        BACKUP_DIR="/var/backups/huda-ai"
-                        NEW_DIST="$APP/frontend/dist.new-$BUILD_ID"
-                        OLD_DIST="$APP/frontend/dist.old-$BUILD_ID"
+APP="/huda-ai"
+STAGE="/tmp/huda-ai-release-$BUILD_ID"
+BACKUP_DIR="/var/backups/huda-ai"
 
-                        BACKUP="$BACKUP_DIR/deploy-$BUILD_ID-$(date +%Y%m%d-%H%M%S).tar.gz"
+NEW_DIST="$APP/frontend/dist.new-$BUILD_ID"
+OLD_DIST="$APP/frontend/dist.old-$BUILD_ID"
 
-                        echo "Checking production files..."
+BACKUP="$BACKUP_DIR/deploy-$BUILD_ID-$(date +%Y%m%d-%H%M%S).tar.gz"
 
-                        test -f "$STAGE/main.py"
-                        test -f "$STAGE/dist/index.html"
-                        test -f "$APP/backend/.env"
-                        test -x "$APP/backend/venv/bin/python"
+echo "Checking production files..."
 
-                        AVAILABLE_MB=$(df -Pm / | awk 'NR==2 {print $4}')
+test -f "$STAGE/main.py"
+test -f "$STAGE/dist/index.html"
+test -f "$APP/backend/.env"
+test -x "$APP/backend/venv/bin/python"
+test -d "$APP/frontend/dist"
 
-                        if [ "$AVAILABLE_MB" -lt 300 ]; then
-                            echo "Not enough disk space for deployment."
-                            exit 1
-                        fi
+AVAILABLE_MB=$(df -Pm / | awk 'NR==2 {print $4}')
 
-                        echo "Checking backend with production Python..."
+if [ "$AVAILABLE_MB" -lt 300 ]; then
+    echo "Not enough disk space for deployment."
+    exit 1
+fi
 
-                        "$APP/backend/venv/bin/python" \
-                            -m py_compile "$STAGE/main.py"
+echo "Checking backend with production Python..."
 
-                        mkdir -p "$BACKUP_DIR"
-                        chmod 700 "$BACKUP_DIR"
+"$APP/backend/venv/bin/python" \
+    -m py_compile "$STAGE/main.py"
 
-                        echo "Creating production backup..."
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 
-                        tar -czf "$BACKUP" \
-                            -C "$APP" \
-                            backend/main.py \
-                            frontend/dist
+echo "Creating production backup..."
 
-                        chmod 600 "$BACKUP"
+tar -czf "$BACKUP" \
+    -C "$APP" \
+    backend/main.py \
+    frontend/dist
 
-                        tar -tzf "$BACKUP" >/dev/null
+chmod 600 "$BACKUP"
 
-                        echo "Backup verified: $BACKUP"
+echo "Verifying backup..."
 
-                        echo "Preparing new frontend..."
+tar -tzf "$BACKUP" >/dev/null
 
-                        rm -rf "$NEW_DIST"
+echo "Backup verified: $BACKUP"
 
-                        cp -a "$STAGE/dist" "$NEW_DIST"
+echo "Preparing new frontend..."
 
-                        chown -R root:root "$NEW_DIST"
+rm -rf "$NEW_DIST" "$OLD_DIST"
 
-                        echo "Deploying application files..."
+cp -a "$STAGE/dist" "$NEW_DIST"
 
-                        rollback() {
-                            STATUS=$?
-                            trap - ERR
-                            set +e
+chown -R root:root "$NEW_DIST"
 
-                            echo "Deployment failed. Rolling back..."
+echo "Defining rollback procedure..."
 
-                            rm -rf "$APP/frontend/dist"
+rollback() {
+    STATUS=$?
 
-                            tar -xzf "$BACKUP" -C "$APP"
+    trap - ERR
+    set +e
 
-                            systemctl restart huda-ai.service
+    echo "======================================"
+    echo "DEPLOYMENT FAILED - STARTING ROLLBACK"
+    echo "======================================"
 
-                            sleep 3
+    rm -rf "$APP/frontend/dist"
 
-                            curl -fsS \
-                                http://127.0.0.1:8000/api/health
+    if tar -xzf "$BACKUP" -C "$APP"; then
 
-                            rm -rf "$NEW_DIST"
-                            rm -rf "$OLD_DIST"
-                            rm -rf "$STAGE"
+        echo "Previous application files restored."
 
-                            echo "Rollback completed."
+        systemctl restart huda-ai.service
 
-                            exit "$STATUS"
-                        }
+        sleep 3
 
-                        trap rollback ERR
+        if curl -fsS \
+            http://127.0.0.1:8000/api/health; then
+            echo "Previous backend is healthy."
+        else
+            echo "WARNING: Backend health check failed after rollback."
+        fi
 
-                        mv "$APP/frontend/dist" "$OLD_DIST"
+        rm -rf "$NEW_DIST" "$OLD_DIST" "$STAGE"
 
-                        mv "$NEW_DIST" "$APP/frontend/dist"
+        echo "Rollback completed."
+        echo "Backup retained at: $BACKUP"
 
-                        install -o root -g root -m 0644 \
-                            "$STAGE/main.py" \
-                            "$APP/backend/main.py"
+    else
+        echo "CRITICAL: Backup restoration failed."
+        echo "Manual recovery is required."
+        echo "Backup location: $BACKUP"
+        echo "Previous frontend may be available at: $OLD_DIST"
 
-                        echo "Restarting FastAPI..."
+        exit 1
+    fi
 
-                        systemctl restart huda-ai.service
+    exit "$STATUS"
+}
 
-                        sleep 3
+echo "Enabling rollback protection..."
 
-                        echo "Checking backend health..."
+trap rollback ERR
 
-                        curl -fsS \
-                            http://127.0.0.1:8000/api/health
+echo "Deploying new frontend..."
 
-                        echo
-                        echo "Production backend is healthy."
+mv "$APP/frontend/dist" "$OLD_DIST"
 
-echo "Checking public chat website..."
-CHAT_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+mv "$NEW_DIST" "$APP/frontend/dist"
+
+echo "Deploying backend source..."
+
+install -o root -g root -m 0644 \
+    "$STAGE/main.py" \
+    "$APP/backend/main.py"
+
+echo "Restarting FastAPI..."
+
+systemctl restart huda-ai.service
+
+sleep 3
+
+echo "Checking local backend health..."
+
+curl -fsS \
+    http://127.0.0.1:8000/api/health
+
+echo
+
+echo "Checking public API health..."
+
+curl --connect-timeout 10 --max-time 30 -fsS \
+    https://chat.hudamusthafa.tech/api/health
+
+echo
+
+echo "Checking chat website..."
+
+CHAT_STATUS=$(curl --connect-timeout 10 --max-time 30 \
+    -sS -o /dev/null -w "%{http_code}" \
     https://chat.hudamusthafa.tech)
 
 test "$CHAT_STATUS" = "200"
 
 echo "Chat website: HTTP $CHAT_STATUS"
 
-echo "Checking public agents website..."
-AGENTS_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+echo "Checking agents website..."
+
+AGENTS_STATUS=$(curl --connect-timeout 10 --max-time 30 \
+    -sS -o /dev/null -w "%{http_code}" \
     https://agents.hudamusthafa.tech)
 
 test "$AGENTS_STATUS" = "200"
 
 echo "Agents website: HTTP $AGENTS_STATUS"
 
+echo "All production health checks passed."
+
+echo "Cleaning temporary deployment files..."
+
+rm -rf "$OLD_DIST" "$STAGE"
+
 trap - ERR
-                        
 
-                        rm -rf "$OLD_DIST"
-                        rm -rf "$STAGE"
+echo "======================================"
+echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
+echo "======================================"
 
-                        echo "Deployment completed successfully."
-                        echo "Backup available at: $BACKUP"
+echo "Production backup: $BACKUP"
 
-                        REMOTE_SCRIPT
+REMOTE_SCRIPT
                     '''
                 }
-            }
-        }
-
-        stage('Verify Production Websites') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Checking backend..."
-
-                    curl -fsS \
-                        https://chat.hudamusthafa.tech/api/health
-
-                    echo
-
-                    echo "Checking chat website..."
-
-                    curl -fsS -o /dev/null \
-                        -w "Chat HTTP: %{http_code}\\n" \
-                        https://chat.hudamusthafa.tech
-
-                    echo "Checking agents website..."
-
-                    curl -fsS -o /dev/null \
-                        -w "Agents HTTP: %{http_code}\\n" \
-                        https://agents.hudamusthafa.tech
-
-                    echo "Production verification completed."
-                '''
             }
         }
     }
@@ -272,7 +297,7 @@ trap - ERR
         }
 
         failure {
-            echo 'Deployment failed. Check the Jenkins console output and EC2 backup.'
+            echo 'Deployment failed. Check Jenkins console output and EC2 backup.'
         }
 
         always {
