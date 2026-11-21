@@ -43,6 +43,29 @@ pipeline {
             }
         }
 
+
+        stage('Run Backend Tests') {
+            steps {
+                dir('backend') {
+                    sh '''
+                        set -e
+
+                        echo "Creating temporary test environment..."
+
+                        python3 -m venv .venv-deploy-test
+
+                        .venv-deploy-test/bin/python -m pip install --upgrade pip
+
+                        .venv-deploy-test/bin/pip install -r requirements-dev.txt
+
+                        echo "Running backend automated tests..."
+
+                        .venv-deploy-test/bin/python -m pytest tests/ -v
+                    '''
+                }
+            }
+        }
+
         stage('Archive Build') {
             steps {
                 archiveArtifacts(
@@ -290,7 +313,6 @@ REMOTE_SCRIPT
             }
         }
     }
-
     post {
         success {
             echo 'Huda AI production deployment completed successfully!'
@@ -301,8 +323,9 @@ REMOTE_SCRIPT
         }
 
         always {
+            sh 'rm -rf backend/.venv-deploy-test'
+            echo 'Temporary test environment cleaned.'
             echo 'Deployment pipeline finished.'
         }
     }
 }
-
