@@ -28,8 +28,23 @@ pipeline {
                 dir('backend') {
                     sh 'python3 -m venv .venv-ci'
                     sh '.venv-ci/bin/python -m pip install --upgrade pip'
-                    sh '.venv-ci/bin/pip install -r requirements.txt'
+                    sh '.venv-ci/bin/pip install -r requirements-dev.txt'
+                }
+            }
+        }
+
+        stage('Validate Backend') {
+            steps {
+                dir('backend') {
                     sh '.venv-ci/bin/python -m compileall -q main.py'
+                }
+            }
+        }
+
+        stage('Run Backend Tests') {
+            steps {
+                dir('backend') {
+                    sh '.venv-ci/bin/python -m pytest tests/ -v'
                 }
             }
         }
@@ -38,10 +53,13 @@ pipeline {
     post {
         success {
             echo 'Huda AI CI pipeline completed successfully!'
+            echo 'Frontend build and backend tests passed.'
         }
+
         failure {
             echo 'Huda AI CI pipeline failed. Check the build logs.'
         }
+
         always {
             sh 'rm -rf backend/.venv-ci'
         }
