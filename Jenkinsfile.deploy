@@ -340,7 +340,7 @@ REMOTE_SCRIPT
                             exit 1
                         fi
 
-                        printf '%s\\n' "$BACKUP_REFERENCE" > release-backup.txt
+                        printf '%s\n' "$BACKUP_REFERENCE" > release-backup.txt
 
                         echo "Captured production backup: $BACKUP_REFERENCE"
                     '''
@@ -360,14 +360,14 @@ REMOTE_SCRIPT
                         RELEASE_TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
                         {
-                            printf 'Application: Huda AI\\n'
-                            printf 'Deployment status: SUCCESS\\n'
-                            printf 'Build number: %s\\n' "$BUILD_NUMBER"
-                            printf 'Git commit: %s\\n' "$RELEASE_COMMIT"
-                            printf 'Git branch: %s\\n' "$RELEASE_BRANCH"
-                            printf 'Release timestamp (UTC): %s\\n' "$RELEASE_TIMESTAMP"
-                            printf 'Production host: %s\\n' "$EC2_HOST"
-                            printf 'Production backup: %s\\n' "$BACKUP_REFERENCE"
+                            printf 'Application: Huda AI\n'
+                            printf 'Deployment status: SUCCESS\n'
+                            printf 'Build number: %s\n' "$BUILD_NUMBER"
+                            printf 'Git commit: %s\n' "$RELEASE_COMMIT"
+                            printf 'Git branch: %s\n' "$RELEASE_BRANCH"
+                            printf 'Release timestamp (UTC): %s\n' "$RELEASE_TIMESTAMP"
+                            printf 'Production host: %s\n' "$EC2_HOST"
+                            printf 'Production backup: %s\n' "$BACKUP_REFERENCE"
                         } > release-manifest.txt
 
                         echo "Release manifest created."
