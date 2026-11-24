@@ -14,10 +14,34 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
+
+                script {
+                    def commit = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    def branch = sh(
+                        script: 'git branch --show-current',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!branch) {
+                        branch = 'main'
+                    }
+
+                    env.RELEASE_COMMIT = commit
+                    env.RELEASE_BRANCH = branch
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - ${commit}"
+                    currentBuild.description = "Production release candidate | Commit: ${commit} | Branch: ${branch}"
+
+                    echo "Production release candidate: ${commit}"
+                    echo "Release branch: ${branch}"
+                }
             }
         }
 
@@ -42,7 +66,6 @@ pipeline {
                 }
             }
         }
-
 
         stage('Run Backend Tests') {
             steps {
@@ -95,8 +118,8 @@ pipeline {
                         usernameVariable: 'SSH_USER'
                     )
                 ]) {
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -euo pipefail
 
                         REMOTE_STAGE="/tmp/huda-ai-release-${BUILD_NUMBER}"
 
@@ -130,7 +153,7 @@ pipeline {
                             -o IdentitiesOnly=yes \
                             -o BatchMode=yes \
                             "$SSH_USER@$EC2_HOST" \
-                            "sudo bash -s -- '$BUILD_NUMBER'" <<'REMOTE_SCRIPT'
+                            "sudo bash -s -- '$BUILD_NUMBER'" <<'REMOTE_SCRIPT' | tee deploy-output.log
 
 set -Eeuo pipefail
 
@@ -306,16 +329,64 @@ echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
 echo "======================================"
 
 echo "Production backup: $BACKUP"
+echo "BACKUP_REFERENCE=$BACKUP"
 
 REMOTE_SCRIPT
+
+                        BACKUP_REFERENCE=$(sed -n 's/^BACKUP_REFERENCE=//p' deploy-output.log | tail -n 1)
+
+                        if [ -z "$BACKUP_REFERENCE" ]; then
+                            echo "ERROR: Production backup reference was not returned."
+                            exit 1
+                        fi
+
+                        printf '%s\\n' "$BACKUP_REFERENCE" > release-backup.txt
+
+                        echo "Captured production backup: $BACKUP_REFERENCE"
                     '''
                 }
             }
         }
+
+        stage('Record Successful Release') {
+            steps {
+                script {
+                    sh '''
+                        set -eu
+
+                        test -s release-backup.txt
+
+                        BACKUP_REFERENCE=$(cat release-backup.txt)
+                        RELEASE_TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+                        {
+                            printf 'Application: Huda AI\\n'
+                            printf 'Deployment status: SUCCESS\\n'
+                            printf 'Build number: %s\\n' "$BUILD_NUMBER"
+                            printf 'Git commit: %s\\n' "$RELEASE_COMMIT"
+                            printf 'Git branch: %s\\n' "$RELEASE_BRANCH"
+                            printf 'Release timestamp (UTC): %s\\n' "$RELEASE_TIMESTAMP"
+                            printf 'Production host: %s\\n' "$EC2_HOST"
+                            printf 'Production backup: %s\\n' "$BACKUP_REFERENCE"
+                        } > release-manifest.txt
+
+                        echo "Release manifest created."
+                        cat release-manifest.txt
+                    '''
+
+                    archiveArtifacts(
+                        artifacts: 'release-manifest.txt',
+                        fingerprint: true
+                    )
+                }
+            }
+        }
     }
+
     post {
         success {
             echo 'Huda AI production deployment completed successfully!'
+            echo 'Release manifest archived successfully.'
         }
 
         failure {
@@ -323,8 +394,12 @@ REMOTE_SCRIPT
         }
 
         always {
-            sh 'rm -rf backend/.venv-deploy-test'
-            echo 'Temporary test environment cleaned.'
+            sh '''
+                rm -rf backend/.venv-deploy-test
+                rm -f deploy-output.log release-backup.txt
+            '''
+
+            echo 'Temporary files cleaned.'
             echo 'Deployment pipeline finished.'
         }
     }

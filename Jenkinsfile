@@ -11,8 +11,30 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+
+                script {
+                    def commit = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    def branch = sh(
+                        script: 'git branch --show-current',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!branch) {
+                        branch = 'main'
+                    }
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - ${commit}"
+                    currentBuild.description = "Commit: ${commit} | Branch: ${branch}"
+
+                    echo "Building Git commit: ${commit}"
+                }
             }
         }
+
 
         stage('Build React Frontend') {
             steps {
