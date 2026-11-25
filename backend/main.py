@@ -18,6 +18,10 @@ from bson import ObjectId
 from pydantic import BaseModel, EmailStr
 from pwdlib import PasswordHash
 
+import smtplib
+from email.message import EmailMessage
+from email.utils import formataddr
+
 load_dotenv()
 
 API_BASE_URL = os.getenv("AI_API_BASE_URL", "").rstrip("/")
@@ -36,9 +40,196 @@ password_hash = PasswordHash.recommended()
 
 users_collection = db["users"]
 sessions_collection = db["sessions"]
+email_otps_collection = db["email_otps"]
 
 SESSION_COOKIE_NAME = "huda_session"
 SESSION_DAYS = 7
+
+# =========================
+# EMAIL OTP CONFIGURATION
+# =========================
+
+OTP_EXPIRY_MINUTES = 5
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_SECONDS = 60
+
+
+def generate_otp():
+    return f"{secrets.randbelow(1000000):06d}"
+
+
+def send_otp_email(email: str, otp: str, purpose: str):
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.getenv("SMTP_USERNAME")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    from_email = os.getenv("SMTP_FROM_EMAIL")
+    from_name = os.getenv("SMTP_FROM_NAME", "Huda AI")
+
+    if not all([
+        smtp_host,
+        smtp_username,
+        smtp_password,
+        from_email,
+    ]):
+        raise RuntimeError("SMTP configuration is incomplete.")
+
+    if purpose == "signup":
+        subject = "Verify your Huda AI account"
+    elif purpose == "password_reset":
+        subject = "Reset your Huda AI password"
+    else:
+        subject = "Your Huda AI login verification code"
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = formataddr((from_name, from_email))
+    message["To"] = email
+
+    message.set_content(
+        f"""Hello,
+
+Your Huda AI verification code is:
+
+{otp}
+
+This code expires in {OTP_EXPIRY_MINUTES} minutes.
+
+If you did not request this code, please ignore this email.
+
+Regards,
+Huda AI Team
+"""
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(smtp_username, smtp_password)
+        server.send_message(message)
+
+# =========================
+# OTP STORAGE AND VERIFICATION
+# =========================
+def ensure_utc_aware(value):
+    """
+    Convert a datetime to timezone-aware UTC.
+    MongoDB may return naive UTC datetimes.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+def create_and_send_otp(email: str, purpose: str, pending_user=None):
+    now = datetime.now(timezone.utc)
+
+    existing_otp = email_otps_collection.find_one({
+        "email": email,
+        "purpose": purpose
+    })
+
+    # Prevent repeated OTP requests within 60 seconds
+    if existing_otp:
+        last_sent = ensure_utc_aware(existing_otp["createdAt"])
+
+        if now < last_sent + timedelta(seconds=OTP_RESEND_SECONDS):
+            raise HTTPException(
+                429,
+                "Please wait before requesting another OTP."
+            )
+
+    otp = generate_otp()
+
+    otp_document = {
+        "email": email,
+        "purpose": purpose,
+        "otpHash": password_hash.hash(otp),
+        "createdAt": now,
+        "expiresAt": now + timedelta(minutes=OTP_EXPIRY_MINUTES),
+        "attempts": 0,
+        "pendingUser": pending_user,
+    }
+
+    try:
+        send_otp_email(email, otp, purpose)
+    except Exception:
+        raise HTTPException(
+            503,
+            "Unable to send verification email. Please try again later."
+        )
+
+    if existing_otp:
+        email_otps_collection.update_one(
+            {"_id": existing_otp["_id"]},
+            {"$set": otp_document}
+        )
+    else:
+        email_otps_collection.insert_one(otp_document)
+
+
+def verify_otp(email: str, purpose: str, otp: str):
+    otp_document = email_otps_collection.find_one({
+        "email": email,
+        "purpose": purpose
+    })
+
+    if not otp_document:
+        raise HTTPException(
+            400,
+            "OTP not found. Please request a new OTP."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    expires_at = ensure_utc_aware(otp_document["expiresAt"])
+
+    if now >= expires_at:
+        email_otps_collection.delete_one({
+            "_id": otp_document["_id"]
+        })
+        raise HTTPException(
+            400,
+            "OTP expired. Please request a new OTP."
+        )
+
+    if otp_document["attempts"] >= OTP_MAX_ATTEMPTS:
+        email_otps_collection.delete_one({
+            "_id": otp_document["_id"]
+        })
+        raise HTTPException(
+            429,
+            "Too many incorrect attempts. Please request a new OTP."
+        )
+
+    if not password_hash.verify(otp, otp_document["otpHash"]):
+        new_attempts = otp_document["attempts"] + 1
+
+        if new_attempts >= OTP_MAX_ATTEMPTS:
+            email_otps_collection.delete_one({
+                "_id": otp_document["_id"]
+            })
+            raise HTTPException(
+                429,
+                "Too many incorrect attempts. Please request a new OTP."
+            )
+
+        email_otps_collection.update_one(
+            {"_id": otp_document["_id"]},
+            {"$set": {"attempts": new_attempts}}
+        )
+
+        raise HTTPException(
+            400,
+            "Incorrect OTP. Please try again."
+        )
+
+    email_otps_collection.delete_one({
+        "_id": otp_document["_id"]
+    })
+
+    return otp_document
 
 if not API_BASE_URL or not API_KEY:
     print("WARNING: AI_API_BASE_URL or AI_API_KEY is not configured.")
@@ -149,10 +340,32 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class OTPVerificationRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+class OTPResendRequest(BaseModel):
+    email: EmailStr
+    purpose: str
+
+
+class EmailRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
+
+class UpdateProfileRequest(BaseModel):
+    name: str
+
 @app.post("/api/auth/signup")
 async def signup(data: SignupRequest):
     name = data.name.strip()
-    email = data.email.lower().strip()
+    email = str(data.email).lower().strip()
 
     if len(name) < 2:
         raise HTTPException(400, "Name must be at least 2 characters.")
@@ -163,32 +376,129 @@ async def signup(data: SignupRequest):
     existing_user = users_collection.find_one({"email": email})
 
     if existing_user:
-        raise HTTPException(409, "An account with this email already exists.")
+        raise HTTPException(
+            409,
+            "An account with this email already exists."
+        )
 
-    hashed_password = password_hash.hash(data.password)
-
-    user = {
+    pending_user = {
         "name": name,
         "email": email,
-        "passwordHash": hashed_password,
+        "passwordHash": password_hash.hash(data.password),
         "authProvider": "local",
-        "createdAt": datetime.now(timezone.utc),
     }
 
-    result = users_collection.insert_one(user)
+    create_and_send_otp(
+        email=email,
+        purpose="signup",
+        pending_user=pending_user
+    )
+
+    return {
+        "message": "Verification OTP sent to your email.",
+        "email": email,
+    }
+
+
+@app.post("/api/auth/signup/verify")
+async def verify_signup(data: OTPVerificationRequest):
+    email = str(data.email).lower().strip()
+
+    if len(data.otp) != 6 or not data.otp.isdigit():
+        raise HTTPException(400, "Please enter a valid 6-digit OTP.")
+
+    otp_document = verify_otp(email, "signup", data.otp)
+
+    pending_user = otp_document.get("pendingUser")
+
+    if not pending_user:
+        raise HTTPException(
+            400,
+            "Registration details not found. Please sign up again."
+        )
+
+    if users_collection.find_one({"email": email}):
+        raise HTTPException(
+            409,
+            "An account with this email already exists."
+        )
+
+    pending_user["emailVerified"] = True
+    pending_user["createdAt"] = datetime.now(timezone.utc)
+
+    result = users_collection.insert_one(pending_user)
 
     return {
         "message": "Account created successfully.",
         "user": {
             "id": str(result.inserted_id),
-            "name": name,
+            "name": pending_user["name"],
             "email": email,
         },
     }
 
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(data: EmailRequest):
+    email = str(data.email).lower().strip()
+
+    user = users_collection.find_one({"email": email})
+
+    # Use the same response for existing and non-existing accounts.
+    # This avoids disclosing whether an email is registered.
+    if user and user.get("authProvider") == "local":
+        create_and_send_otp(
+            email=email,
+            purpose="password_reset"
+        )
+
+    return {
+        "message": "If a matching account exists, a password reset code will be sent."
+    }
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(data: PasswordResetRequest):
+    email = str(data.email).lower().strip()
+
+    if len(data.otp) != 6 or not data.otp.isdigit():
+        raise HTTPException(400, "Please enter a valid 6-digit OTP.")
+
+    if len(data.new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters.")
+
+    user = users_collection.find_one({"email": email})
+
+    if not user or user.get("authProvider") != "local":
+        raise HTTPException(
+            400,
+            "Unable to reset password. Please request a new code."
+        )
+
+    # Verify and consume the password-reset OTP before changing the password.
+    verify_otp(email, "password_reset", data.otp)
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "passwordHash": password_hash.hash(data.new_password),
+                "passwordUpdatedAt": datetime.now(timezone.utc)
+            }
+        }
+    )
+
+    # Invalidate existing sessions so the user must sign in with the new password.
+    sessions_collection.delete_many({"userId": user["_id"]})
+
+    return {
+        "message": "Password reset successfully. Please sign in again."
+    }
+
+
 @app.post("/api/auth/login")
-async def login(data: LoginRequest, response: Response):
-    email = data.email.lower().strip()
+async def login(data: LoginRequest):
+    email = str(data.email).lower().strip()
 
     user = users_collection.find_one({"email": email})
 
@@ -203,6 +513,37 @@ async def login(data: LoginRequest, response: Response):
 
     if not password_hash.verify(data.password, user["passwordHash"]):
         raise HTTPException(401, "Invalid email or password.")
+
+    create_and_send_otp(
+        email=email,
+        purpose="login"
+    )
+
+    return {
+        "message": "Login verification OTP sent to your email.",
+        "email": email,
+    }
+
+
+@app.post("/api/auth/login/verify")
+async def verify_login(data: OTPVerificationRequest, response: Response):
+    email = str(data.email).lower().strip()
+
+    if len(data.otp) != 6 or not data.otp.isdigit():
+        raise HTTPException(400, "Please enter a valid 6-digit OTP.")
+
+    verify_otp(email, "login", data.otp)
+
+    user = users_collection.find_one({"email": email})
+
+    if not user or user.get("authProvider") != "local":
+        raise HTTPException(401, "Unable to verify login.")
+
+    # Verify existing accounts that were created before OTP was introduced.
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"emailVerified": True}}
+    )
 
     token = create_session(user["_id"])
 
@@ -221,8 +562,67 @@ async def login(data: LoginRequest, response: Response):
         "user": {
             "id": str(user["_id"]),
             "name": user["name"],
-            "email": user["email"],
+            "email": email,
         },
+    }
+
+
+@app.post("/api/auth/otp/resend")
+async def resend_otp(data: OTPResendRequest):
+    email = str(data.email).lower().strip()
+    purpose = data.purpose.strip().lower()
+
+    if purpose not in {"signup", "login", "password_reset"}:
+        raise HTTPException(400, "Invalid OTP purpose.")
+
+    existing_otp = email_otps_collection.find_one({
+        "email": email,
+        "purpose": purpose
+    })
+
+    if not existing_otp:
+        raise HTTPException(
+            404,
+            "No pending verification found. Please start again."
+        )
+
+    if purpose == "signup":
+        if users_collection.find_one({"email": email}):
+            raise HTTPException(
+                409,
+                "An account with this email already exists."
+            )
+
+        pending_user = existing_otp.get("pendingUser")
+
+        if not pending_user:
+            raise HTTPException(
+                400,
+                "Registration details not found. Please sign up again."
+            )
+
+        create_and_send_otp(
+            email=email,
+            purpose="signup",
+            pending_user=pending_user
+        )
+
+    else:
+        user = users_collection.find_one({"email": email})
+
+        if not user or user.get("authProvider") != "local":
+            raise HTTPException(
+                404,
+                "Account not found. Please start again."
+            )
+
+        create_and_send_otp(
+            email=email,
+            purpose=purpose
+        )
+
+    return {
+        "message": "A new verification OTP has been sent."
     }
 
 @app.get("/api/auth/me")
@@ -254,6 +654,31 @@ async def auth_me(request: Request):
             "email": user["email"],
         }
     }
+
+@app.patch("/api/auth/profile")
+async def update_profile(
+    data: UpdateProfileRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    name = data.name.strip()
+
+    if len(name) < 2:
+        raise HTTPException(400, "Name must be at least 2 characters.")
+
+    users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$set": {"name": name, "updatedAt": datetime.now(timezone.utc)}}
+    )
+
+    return {
+        "message": "Profile updated successfully.",
+        "user": {
+            "id": str(current_user["_id"]),
+            "name": name,
+            "email": current_user["email"]
+        }
+    }
+
 
 @app.post("/api/auth/logout")
 async def logout(request: Request, response: Response):
