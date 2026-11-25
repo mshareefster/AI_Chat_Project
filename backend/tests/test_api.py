@@ -46,7 +46,78 @@ def test_chat_without_login(client):
     assert response.status_code == 401
 
 
-def test_signup_success(client):
+def complete_signup(
+    client,
+    sent_otps,
+    name="Test User",
+    email="test@example.com",
+):
+    signup_response = client.post(
+        "/api/auth/signup",
+        json={
+            "name": name,
+            "email": email,
+            "password": "password123"
+        }
+    )
+
+    assert signup_response.status_code == 200
+
+    otp = sent_otps[-1]["otp"]
+
+    verify_response = client.post(
+        "/api/auth/signup/verify",
+        json={
+            "email": email,
+            "otp": otp
+        }
+    )
+
+    assert verify_response.status_code == 200
+
+    return verify_response
+
+
+def create_logged_in_user(
+    client,
+    sent_otps,
+    name="Test User",
+    email="test@example.com"
+):
+    complete_signup(
+        client,
+        sent_otps,
+        name=name,
+        email=email
+    )
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={
+            "email": email,
+            "password": "password123"
+        }
+    )
+
+    assert login_response.status_code == 200
+
+    otp = sent_otps[-1]["otp"]
+
+    verify_response = client.post(
+        "/api/auth/login/verify",
+        json={
+            "email": email,
+            "otp": otp
+        }
+    )
+
+    assert verify_response.status_code == 200
+    assert "huda_session" in verify_response.cookies
+
+    return verify_response
+
+
+def test_signup_success(client, sent_otps):
     response = client.post(
         "/api/auth/signup",
         json={
@@ -57,8 +128,43 @@ def test_signup_success(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["message"] == "Account created successfully."
-    assert response.json()["user"]["email"] == "test@example.com"
+    assert response.json()["message"] == "Verification OTP sent to your email."
+    assert sent_otps[-1]["purpose"] == "signup"
+
+    verify_response = client.post(
+        "/api/auth/signup/verify",
+        json={
+            "email": "test@example.com",
+            "otp": sent_otps[-1]["otp"]
+        }
+    )
+
+    assert verify_response.status_code == 200
+    assert verify_response.json()["message"] == "Account created successfully."
+    assert verify_response.json()["user"]["email"] == "test@example.com"
+
+
+def test_signup_does_not_create_user_before_verification(client, sent_otps):
+    response = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Test User",
+            "email": "pending@example.com",
+            "password": "password123"
+        }
+    )
+
+    assert response.status_code == 200
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={
+            "email": "pending@example.com",
+            "password": "password123"
+        }
+    )
+
+    assert login_response.status_code == 401
 
 
 def test_signup_invalid_email(client):
@@ -88,22 +194,10 @@ def test_signup_short_password(client):
     assert response.json()["detail"] == "Password must be at least 8 characters."
 
 
-def test_signup_duplicate_email(client):
-    payload = {
-        "name": "Test User",
-        "email": "test@example.com",
-        "password": "password123"
-    }
+def test_signup_duplicate_email(client, sent_otps):
+    complete_signup(client, sent_otps)
 
-    first_response = client.post("/api/auth/signup", json=payload)
-    second_response = client.post("/api/auth/signup", json=payload)
-
-    assert first_response.status_code == 200
-    assert second_response.status_code == 409
-
-
-def test_login_success(client):
-    signup_response = client.post(
+    second_response = client.post(
         "/api/auth/signup",
         json={
             "name": "Test User",
@@ -112,7 +206,33 @@ def test_login_success(client):
         }
     )
 
-    assert signup_response.status_code == 200
+    assert second_response.status_code == 409
+
+
+def test_signup_wrong_otp(client, sent_otps):
+    client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Test User",
+            "email": "wrongotp@example.com",
+            "password": "password123"
+        }
+    )
+
+    response = client.post(
+        "/api/auth/signup/verify",
+        json={
+            "email": "wrongotp@example.com",
+            "otp": "000000"
+        }
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Incorrect OTP. Please try again."
+
+
+def test_login_success(client, sent_otps):
+    complete_signup(client, sent_otps)
 
     response = client.post(
         "/api/auth/login",
@@ -123,19 +243,42 @@ def test_login_success(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["message"] == "Login successful."
-    assert "huda_session" in response.cookies
+    assert response.json()["message"] == "Login verification OTP sent to your email."
+    assert "huda_session" not in response.cookies
 
-
-def test_login_wrong_password(client):
-    client.post(
-        "/api/auth/signup",
+    verify_response = client.post(
+        "/api/auth/login/verify",
         json={
-            "name": "Test User",
+            "email": "test@example.com",
+            "otp": sent_otps[-1]["otp"]
+        }
+    )
+
+    assert verify_response.status_code == 200
+    assert verify_response.json()["message"] == "Login successful."
+    assert "huda_session" in verify_response.cookies
+
+
+def test_login_without_otp_does_not_create_session(client, sent_otps):
+    complete_signup(client, sent_otps)
+
+    response = client.post(
+        "/api/auth/login",
+        json={
             "email": "test@example.com",
             "password": "password123"
         }
     )
+
+    assert response.status_code == 200
+
+    me_response = client.get("/api/auth/me")
+
+    assert me_response.status_code == 401
+
+
+def test_login_wrong_password(client, sent_otps):
+    complete_signup(client, sent_otps)
 
     response = client.post(
         "/api/auth/login",
@@ -149,25 +292,39 @@ def test_login_wrong_password(client):
     assert response.json()["detail"] == "Invalid email or password."
 
 
-def test_session_validation_after_login(client):
-    client.post(
-        "/api/auth/signup",
-        json={
-            "name": "Session User",
-            "email": "session@example.com",
-            "password": "password123"
-        }
-    )
+def test_login_wrong_otp(client, sent_otps):
+    complete_signup(client, sent_otps)
 
-    login_response = client.post(
+    client.post(
         "/api/auth/login",
         json={
-            "email": "session@example.com",
+            "email": "test@example.com",
             "password": "password123"
         }
     )
 
-    assert login_response.status_code == 200
+    response = client.post(
+        "/api/auth/login/verify",
+        json={
+            "email": "test@example.com",
+            "otp": "000000"
+        }
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Incorrect OTP. Please try again."
+
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 401
+
+
+def test_session_validation_after_login(client, sent_otps):
+    create_logged_in_user(
+        client,
+        sent_otps,
+        name="Session User",
+        email="session@example.com"
+    )
 
     response = client.get("/api/auth/me")
 
@@ -175,22 +332,12 @@ def test_session_validation_after_login(client):
     assert response.json()["user"]["email"] == "session@example.com"
 
 
-def test_logout(client):
-    client.post(
-        "/api/auth/signup",
-        json={
-            "name": "Logout User",
-            "email": "logout@example.com",
-            "password": "password123"
-        }
-    )
-
-    client.post(
-        "/api/auth/login",
-        json={
-            "email": "logout@example.com",
-            "password": "password123"
-        }
+def test_logout(client, sent_otps):
+    create_logged_in_user(
+        client,
+        sent_otps,
+        name="Logout User",
+        email="logout@example.com"
     )
 
     logout_response = client.post("/api/auth/logout")
@@ -202,31 +349,56 @@ def test_logout(client):
 
     assert response.status_code == 401
 
-def create_logged_in_user(client, name="Test User", email="test@example.com"):
-    signup_response = client.post(
+
+def test_otp_resend(client, sent_otps):
+    client.post(
         "/api/auth/signup",
         json={
-            "name": name,
-            "email": email,
+            "name": "Resend User",
+            "email": "resend@example.com",
             "password": "password123"
         }
     )
 
-    assert signup_response.status_code == 200
-
-    login_response = client.post(
-        "/api/auth/login",
+    # The first OTP request starts the 60-second cooldown.
+    response = client.post(
+        "/api/auth/otp/resend",
         json={
-            "email": email,
+            "email": "resend@example.com",
+            "purpose": "signup"
+        }
+    )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "Please wait before requesting another OTP."
+
+
+def test_otp_requires_six_digits(client, sent_otps):
+    client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Test User",
+            "email": "digits@example.com",
             "password": "password123"
         }
     )
 
-    assert login_response.status_code == 200
+    response = client.post(
+        "/api/auth/signup/verify",
+        json={
+            "email": "digits@example.com",
+            "otp": "123"
+        }
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Please enter a valid 6-digit OTP."
 
 
-def test_create_conversation_after_login(client):
-    create_logged_in_user(client)
+# Conversation tests
+
+def test_create_conversation_after_login(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     response = client.post("/api/conversations")
 
@@ -239,8 +411,8 @@ def test_create_conversation_after_login(client):
     assert conversation["messages"] == []
 
 
-def test_list_conversations_after_login(client):
-    create_logged_in_user(client)
+def test_list_conversations_after_login(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     client.post("/api/conversations")
     client.post("/api/conversations")
@@ -251,8 +423,8 @@ def test_list_conversations_after_login(client):
     assert len(response.json()["conversations"]) == 2
 
 
-def test_get_conversation_by_id(client):
-    create_logged_in_user(client)
+def test_get_conversation_by_id(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     create_response = client.post("/api/conversations")
     conversation_id = create_response.json()["conversation"]["id"]
@@ -264,16 +436,16 @@ def test_get_conversation_by_id(client):
     assert response.json()["conversation"]["title"] == "New chat"
 
 
-def test_get_conversation_invalid_id(client):
-    create_logged_in_user(client)
+def test_get_conversation_invalid_id(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     response = client.get("/api/conversations/invalid-id")
 
     assert response.status_code == 400
 
 
-def test_rename_conversation(client):
-    create_logged_in_user(client)
+def test_rename_conversation(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     create_response = client.post("/api/conversations")
     conversation_id = create_response.json()["conversation"]["id"]
@@ -291,8 +463,8 @@ def test_rename_conversation(client):
     assert get_response.json()["conversation"]["title"] == "My AI Chat"
 
 
-def test_rename_conversation_empty_title(client):
-    create_logged_in_user(client)
+def test_rename_conversation_empty_title(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     create_response = client.post("/api/conversations")
     conversation_id = create_response.json()["conversation"]["id"]
@@ -306,8 +478,8 @@ def test_rename_conversation_empty_title(client):
     assert response.json()["detail"] == "Title cannot be empty."
 
 
-def test_rename_conversation_long_title(client):
-    create_logged_in_user(client)
+def test_rename_conversation_long_title(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     create_response = client.post("/api/conversations")
     conversation_id = create_response.json()["conversation"]["id"]
@@ -321,8 +493,8 @@ def test_rename_conversation_long_title(client):
     assert response.json()["detail"] == "Title is too long."
 
 
-def test_delete_conversation(client):
-    create_logged_in_user(client)
+def test_delete_conversation(client, sent_otps):
+    create_logged_in_user(client, sent_otps)
 
     create_response = client.post("/api/conversations")
     conversation_id = create_response.json()["conversation"]["id"]
@@ -337,9 +509,10 @@ def test_delete_conversation(client):
     assert get_response.status_code == 404
 
 
-def test_user_cannot_access_another_users_conversation(client):
+def test_user_cannot_access_another_users_conversation(client, sent_otps):
     create_logged_in_user(
         client,
+        sent_otps,
         name="First User",
         email="first@example.com"
     )
@@ -351,6 +524,7 @@ def test_user_cannot_access_another_users_conversation(client):
 
     create_logged_in_user(
         client,
+        sent_otps,
         name="Second User",
         email="second@example.com"
     )
@@ -358,3 +532,4 @@ def test_user_cannot_access_another_users_conversation(client):
     response = client.get(f"/api/conversations/{conversation_id}")
 
     assert response.status_code == 404
+

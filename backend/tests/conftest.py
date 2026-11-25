@@ -130,15 +130,36 @@ class FakeMongoClient:
 pymongo.MongoClient = FakeMongoClient
 
 from fastapi.testclient import TestClient
+import main as main_module
 from main import app, users_collection, sessions_collection, db
 
+@pytest.fixture
+def sent_otps(monkeypatch):
+    captured_otps = []
+
+    def fake_send_otp_email(email, otp, purpose):
+        captured_otps.append({
+            "email": email,
+            "otp": otp,
+            "purpose": purpose,
+        })
+
+    monkeypatch.setattr(
+        main_module,
+        "send_otp_email",
+        fake_send_otp_email
+    )
+
+    return captured_otps
 
 @pytest.fixture
-def client():
+def client(sent_otps):
     users_collection.documents.clear()
     sessions_collection.documents.clear()
     db["conversations"].documents.clear()
-
+    email_otps_collection = db["email_otps"]
+    email_otps_collection.documents.clear()
+    
     with TestClient(
         app,
         base_url="https://testserver"
