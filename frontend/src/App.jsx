@@ -36,8 +36,22 @@ function Login() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpStep, setOtpStep] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+
+    const timer = setTimeout(() => {
+      setResendCountdown((current) => Math.max(0, current - 1));
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [resendCountdown]);
 
   async function handleLogin(e) {
     e.preventDefault();
@@ -49,6 +63,7 @@ function Login() {
 
     setBusy(true);
     setError("");
+    setSuccess("");
 
     try {
       const response = await fetch("/api/auth/login", {
@@ -58,7 +73,7 @@ function Login() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          email,
+          email: email.trim(),
           password,
         }),
       });
@@ -69,12 +84,98 @@ function Login() {
         throw new Error(data.detail || "Login failed.");
       }
 
+      setOtpStep(true);
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess("A verification code has been sent to your email.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleVerifyOtp(e) {
+    e.preventDefault();
+
+    if (!/^\d{6}$/.test(otp)) {
+      setError("Please enter the 6-digit verification code.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/login/verify", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          otp,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "OTP verification failed.");
+      }
+
       navigate("/chat");
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleResendOtp() {
+    if (resendCountdown > 0 || busy) return;
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/otp/resend", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          purpose: "login",
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not resend the verification code.");
+      }
+
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess("A new verification code has been sent.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function changeEmail() {
+    setOtpStep(false);
+    setOtp("");
+    setError("");
+    setSuccess("");
+    setResendCountdown(0);
   }
 
   return (
@@ -85,61 +186,113 @@ function Login() {
         </div>
 
         <div className="auth-heading">
-          <h1>Welcome back</h1>
-          <p>Sign in to continue to your AI workspace.</p>
+          <h1>{otpStep ? "Verify your email" : "Welcome back"}</h1>
+          <p>
+            {otpStep
+              ? `Enter the 6-digit code sent to ${email}.`
+              : "Sign in to continue to your AI workspace."}
+          </p>
         </div>
 
-        <form onSubmit={handleLogin} className="auth-form">
-          <label>
-            Email
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              autoComplete="email"
-            />
-          </label>
+        {!otpStep ? (
+          <form onSubmit={handleLogin} className="auth-form">
+            <label>
+              Email
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+                required
+              />
+            </label>
 
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password"
-              autoComplete="current-password"
-            />
-          </label>
+            <label>
+              Password
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                required
+              />
+            </label>
 
-          {error && <div className="auth-error">{error}</div>}
+            {error && <div className="auth-error">{error}</div>}
 
-          <button className="auth-submit" disabled={busy}>
-            {busy ? "Signing in..." : "Sign in"}
-          </button>
-        </form>
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Signing in..." : "Continue"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOtp} className="auth-form">
+            <label>
+              Verification code
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otp}
+                onChange={(e) =>
+                  setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                }
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+                required
+              />
+            </label>
 
-        <div className="auth-links">
-          <Link to="/forgot-password">Forgot password?</Link>
-        </div>
+            {error && <div className="auth-error">{error}</div>}
+            {success && <div className="auth-success">{success}</div>}
 
-        <div className="auth-divider">
-          <span>OR</span>
-        </div>
+            <button className="auth-submit" disabled={busy || otp.length !== 6}>
+              {busy ? "Verifying..." : "Verify and sign in"}
+            </button>
 
-        <button
-          type="button"
-          className="google-button"
-          onClick={() => setError("Google Sign-In will be added next.")}
-        >
-          <span className="google-icon">G</span>
-          Continue with Google
-        </button>
+            <div className="auth-links">
+              <button
+                type="button"
+                onClick={handleResendOtp}
+                disabled={busy || resendCountdown > 0}
+              >
+                {resendCountdown > 0
+                  ? `Resend code in ${resendCountdown}s`
+                  : "Resend verification code"}
+              </button>
+              <button type="button" onClick={changeEmail} disabled={busy}>
+                Use a different email
+              </button>
+            </div>
+          </form>
+        )}
 
-        <p className="auth-footer">
-          Don't have an account?{" "}
-          <Link to="/signup">Create account</Link>
-        </p>
+        {!otpStep && (
+          <>
+            <div className="auth-links">
+              <Link to="/forgot-password">Forgot password?</Link>
+            </div>
+
+            <div className="auth-divider">
+              <span>OR</span>
+            </div>
+
+            <button
+              type="button"
+              className="google-button"
+              onClick={() => setError("Google Sign-In will be added next.")}
+            >
+              <span className="google-icon">G</span>
+              Continue with Google
+            </button>
+
+            <p className="auth-footer">
+              Don't have an account?{" "}
+              <Link to="/signup">Create account</Link>
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
@@ -155,9 +308,22 @@ function Signup() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpStep, setOtpStep] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+
+    const timer = setTimeout(() => {
+      setResendCountdown((current) => Math.max(0, current - 1));
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [resendCountdown]);
 
   async function handleSignup(e) {
     e.preventDefault();
@@ -184,8 +350,8 @@ function Signup() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          name,
-          email,
+          name: name.trim(),
+          email: email.trim(),
           password,
         }),
       });
@@ -196,11 +362,339 @@ function Signup() {
         throw new Error(data.detail || "Could not create account.");
       }
 
-      setSuccess("Account created successfully. Redirecting to login...");
+      setOtpStep(true);
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess("A verification code has been sent to your email.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleVerifyOtp(e) {
+    e.preventDefault();
+
+    if (!/^\d{6}$/.test(otp)) {
+      setError("Please enter the 6-digit verification code.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/signup/verify", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          otp,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Email verification failed.");
+      }
+
+      setSuccess("Your email is verified and your account has been created. Redirecting to sign in...");
 
       setTimeout(() => {
         navigate("/login");
-      }, 1200);
+      }, 1500);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    if (resendCountdown > 0 || busy) return;
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/otp/resend", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          purpose: "signup",
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not resend the verification code.");
+      }
+
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess("A new verification code has been sent.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function changeDetails() {
+    setOtpStep(false);
+    setOtp("");
+    setError("");
+    setSuccess("");
+    setResendCountdown(0);
+  }
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <img src="/hai-logo.png" alt="HAi logo" />
+        </div>
+
+        <div className="auth-heading">
+          <h1>{otpStep ? "Verify your email" : "Create your account"}</h1>
+          <p>
+            {otpStep
+              ? `Enter the 6-digit code sent to ${email}.`
+              : "Start using your private AI workspace."}
+          </p>
+        </div>
+
+        {!otpStep ? (
+          <form onSubmit={handleSignup} className="auth-form">
+            <label>
+              Name
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Your name"
+                autoComplete="name"
+                required
+              />
+            </label>
+
+            <label>
+              Email
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+                required
+              />
+            </label>
+
+            <label>
+              Password
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                autoComplete="new-password"
+                required
+              />
+            </label>
+
+            {error && <div className="auth-error">{error}</div>}
+
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Sending verification code..." : "Continue"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOtp} className="auth-form">
+            <label>
+              Verification code
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otp}
+                onChange={(e) =>
+                  setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                }
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+                required
+              />
+            </label>
+
+            {error && <div className="auth-error">{error}</div>}
+            {success && <div className="auth-success">{success}</div>}
+
+            <button className="auth-submit" disabled={busy || otp.length !== 6}>
+              {busy ? "Verifying..." : "Verify email and create account"}
+            </button>
+
+            <div className="auth-links">
+              <button
+                type="button"
+                onClick={handleResendOtp}
+                disabled={busy || resendCountdown > 0}
+              >
+                {resendCountdown > 0
+                  ? `Resend code in ${resendCountdown}s`
+                  : "Resend verification code"}
+              </button>
+              <button type="button" onClick={changeDetails} disabled={busy}>
+                Change account details
+              </button>
+            </div>
+          </form>
+        )}
+
+        {!otpStep && (
+          <p className="auth-footer">
+            Already have an account?{" "}
+            <Link to="/login">Sign in</Link>
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =========================
+   FORGOT PASSWORD PLACEHOLDER
+========================= */
+
+function ForgotPassword() {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [otpStep, setOtpStep] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+    const timer = setTimeout(() => {
+      setResendCountdown((current) => Math.max(0, current - 1));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [resendCountdown]);
+
+  async function handleRequestReset(e) {
+    e.preventDefault();
+    if (!email.trim()) {
+      setError("Please enter your registered email address.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not request a password reset.");
+      }
+      setOtpStep(true);
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess(data.message || "If a matching account exists, a reset code will be sent.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResetPassword(e) {
+    e.preventDefault();
+
+    if (!/^\d{6}$/.test(otp)) {
+      setError("Please enter the 6-digit verification code.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("The passwords do not match.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          otp,
+          new_password: newPassword,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not reset your password.");
+      }
+      setSuccess("Password reset successfully. Redirecting to sign in...");
+      setTimeout(() => navigate("/login"), 1500);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    if (busy || resendCountdown > 0) return;
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/otp/resend", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), purpose: "password_reset" }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not resend the reset code. Please start again.");
+      }
+      setOtp("");
+      setResendCountdown(60);
+      setSuccess("A new password-reset code has been sent.");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -216,81 +710,97 @@ function Signup() {
         </div>
 
         <div className="auth-heading">
-          <h1>Create your account</h1>
-          <p>Start using your private AI workspace.</p>
-        </div>
-
-        <form onSubmit={handleSignup} className="auth-form">
-          <label>
-            Name
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your name"
-              autoComplete="name"
-            />
-          </label>
-
-          <label>
-            Email
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              autoComplete="email"
-            />
-          </label>
-
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="At least 8 characters"
-              autoComplete="new-password"
-            />
-          </label>
-
-          {error && <div className="auth-error">{error}</div>}
-
-          {success && <div className="auth-success">{success}</div>}
-
-          <button className="auth-submit" disabled={busy}>
-            {busy ? "Creating account..." : "Create account"}
-          </button>
-        </form>
-
-        <p className="auth-footer">
-          Already have an account?{" "}
-          <Link to="/login">Sign in</Link>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* =========================
-   FORGOT PASSWORD PLACEHOLDER
-========================= */
-
-function ForgotPassword() {
-  return (
-    <div className="auth-page">
-      <div className="auth-card">
-        <div className="auth-brand">
-          <img src="/hai-logo.png" alt="HAi logo" />
-        </div>
-
-        <div className="auth-heading">
-          <h1>Forgot password?</h1>
+          <h1>{otpStep ? "Reset your password" : "Forgot password?"}</h1>
           <p>
-            Password reset will be available after we configure the reset
-            email system.
+            {otpStep
+              ? `Enter the 6-digit code sent to ${email} and choose a new password.`
+              : "Enter your registered email address. We will send you a password-reset code."}
           </p>
         </div>
+
+        {!otpStep ? (
+          <form onSubmit={handleRequestReset} className="auth-form">
+            <label>
+              Email
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+                required
+              />
+            </label>
+            {error && <div className="auth-error">{error}</div>}
+            {success && <div className="auth-success">{success}</div>}
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Sending code..." : "Send reset code"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleResetPassword} className="auth-form">
+            <label>
+              Verification code
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="Enter 6-digit code"
+                maxLength={6}
+                required
+              />
+            </label>
+            <label>
+              New password
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                autoComplete="new-password"
+                required
+              />
+            </label>
+            <label>
+              Confirm new password
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter your new password"
+                autoComplete="new-password"
+                required
+              />
+            </label>
+            {error && <div className="auth-error">{error}</div>}
+            {success && <div className="auth-success">{success}</div>}
+            <button className="auth-submit" disabled={busy || otp.length !== 6}>
+              {busy ? "Resetting password..." : "Reset password"}
+            </button>
+            <div className="auth-links">
+              <button type="button" onClick={handleResendOtp} disabled={busy || resendCountdown > 0}>
+                {resendCountdown > 0 ? `Resend code in ${resendCountdown}s` : "Resend reset code"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setOtpStep(false);
+                  setOtp("");
+                  setNewPassword("");
+                  setConfirmPassword("");
+                  setError("");
+                  setSuccess("");
+                  setResendCountdown(0);
+                }}
+                disabled={busy}
+              >
+                Use a different email
+              </button>
+            </div>
+          </form>
+        )}
 
         <Link to="/login" className="back-login">
           ← Back to login
@@ -300,6 +810,131 @@ function ForgotPassword() {
   );
 }
 
+
+/* =========================
+   USER PROFILE PAGE
+========================= */
+
+function Profile() {
+  const navigate = useNavigate();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/auth/me", { credentials: "include" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load your profile.");
+        return data.user;
+      })
+      .then((user) => {
+        if (!active) return;
+        setName(user.name || "");
+        setEmail(user.email || "");
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      })
+      .finally(() => {
+        if (active) setBusy(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    if (name.trim().length < 2) {
+      setError("Name must be at least 2 characters.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch("/api/auth/profile", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Could not update your profile.");
+      setName(data.user.name);
+      setSuccess(data.message || "Profile updated successfully.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } finally {
+      navigate("/login");
+    }
+  }
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <img src="/hai-logo.png" alt="HAi logo" />
+        </div>
+        <div className="auth-heading">
+          <h1>Your profile</h1>
+          <p>View and update your Huda AI account details.</p>
+        </div>
+
+        {busy ? (
+          <div className="auth-loading">Loading profile...</div>
+        ) : (
+          <form onSubmit={handleSave} className="auth-form">
+            <label>
+              Name
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoComplete="name"
+                required
+              />
+            </label>
+            <label>
+              Email
+              <input type="email" value={email} readOnly />
+            </label>
+            {error && <div className="auth-error">{error}</div>}
+            {success && <div className="auth-success">{success}</div>}
+            <button className="auth-submit" disabled={saving}>
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          </form>
+        )}
+        {error && busy && <div className="auth-error">{error}</div>}
+        <Link to="/chat" className="back-login">
+          ← Back to chat
+        </Link>
+        <button type="button" className="auth-links" onClick={handleLogout}>
+          Log out
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 /* =========================
    PROTECTED ROUTE
 ========================= */
@@ -308,6 +943,8 @@ function ProtectedRoute({ children }) {
   const [status, setStatus] = useState("checking");
 
   useEffect(() => {
+    let active = true;
+
     fetch("/api/auth/me", {
       credentials: "include",
     })
@@ -319,11 +956,15 @@ function ProtectedRoute({ children }) {
         return response.json();
       })
       .then(() => {
-        setStatus("authenticated");
+        if (active) setStatus("authenticated");
       })
       .catch(() => {
-        setStatus("unauthenticated");
+        if (active) setStatus("unauthenticated");
       });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   if (status === "checking") {
@@ -361,6 +1002,8 @@ function Chat() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef(null);
+  const chatInitializationStarted = useRef(false);
+  const [initializationAttempt, setInitializationAttempt] = useState(0);
 
   async function loadConversations() {
   try {
@@ -516,10 +1159,11 @@ async function deleteConversation(id) {
   }, []);
 
 useEffect(() => {
-  loadConversations();
-}, []);
+  // Avoid duplicate initialization requests, including React Strict Mode's
+  // development-only effect replay.
+  if (chatInitializationStarted.current) return;
+  chatInitializationStarted.current = true;
 
-useEffect(() => {
   async function initializeChat() {
     try {
       const response = await fetch("/api/conversations", {
@@ -573,12 +1217,14 @@ useEffect(() => {
         ]);
       }
     } catch (err) {
+      // Allow the user to retry initialization after a network or API failure.
+      chatInitializationStarted.current = false;
       setError(err.message);
     }
   }
 
   initializeChat();
-}, []);
+}, [initializationAttempt]);
 
   async function logout() {
     try {
@@ -647,6 +1293,12 @@ useEffect(() => {
   async function send() {
     if (busy || (!input.trim() && files.length === 0)) return;
 
+    // Check for an active conversation before clearing the user's message.
+    if (!conversationId) {
+      setError("Please create a new chat first.");
+      return;
+    }
+
     const userText = input.trim();
     const selectedFiles = [...files];
 
@@ -661,13 +1313,8 @@ useEffect(() => {
     setFiles([]);
     setBusy(true);
     setError("");
-if (!conversationId) {
-  setError("Please create a new chat first.");
-  setBusy(false);
-  return;
-}
 
-const form = new FormData();
+    const form = new FormData();
 
 form.append("conversationId", conversationId);
 form.append("model", selected);
@@ -835,6 +1482,10 @@ form.append("message", userText);
           ))}
         </select>
 
+        <Link to="/profile" className="logout-button">
+          Profile
+        </Link>
+
         <button
           className="logout-button"
           onClick={logout}
@@ -954,6 +1605,16 @@ form.append("message", userText);
               {error}
             </div>
           )}
+          {!conversationId && error && (
+            <button
+              type="button"
+              className="auth-submit"
+              onClick={() => setInitializationAttempt((attempt) => attempt + 1)}
+              disabled={busy}
+            >
+              Retry loading chat
+            </button>
+          )}
 
           {files.length > 0 && (
             <div className="file-preview">
@@ -1060,6 +1721,15 @@ function AppRoutes() {
       />
 
       <Route
+        path="/profile"
+        element={
+          <ProtectedRoute>
+            <Profile />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         path="*"
         element={<Navigate to="/login" replace />}
       />
@@ -1075,4 +1745,4 @@ function App() {
   );
 }
 
-export default App;
+export default App; 

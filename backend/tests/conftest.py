@@ -10,6 +10,7 @@ import pytest
 
 # Test-only configuration. Never use production credentials.
 os.environ["MONGODB_URI"] = "mongodb://127.0.0.1:27017/"
+os.environ["MONGODB_DB_NAME"] = "huda_ai_test"
 os.environ["AI_API_BASE_URL"] = "https://example.invalid/v1"
 os.environ["AI_API_KEY"] = "test-only-dummy-key"
 
@@ -50,6 +51,7 @@ class FakeCursor:
 class FakeCollection:
     def __init__(self):
         self.documents = []
+        self.index_calls = []
 
     def matches(self, document, query):
         for key, expected in query.items():
@@ -58,6 +60,12 @@ class FakeCollection:
             if isinstance(expected, dict):
                 if "$gt" in expected:
                     if actual is None or not actual > expected["$gt"]:
+                        return False
+                elif "$lt" in expected:
+                    if actual is None or not actual < expected["$lt"]:
+                        return False
+                elif "$gte" in expected:
+                    if actual is None or not actual >= expected["$gte"]:
                         return False
                 else:
                     return False
@@ -88,13 +96,39 @@ class FakeCollection:
 
         return FakeInsertResult(new_document["_id"])
 
-    def update_one(self, query, update):
+    def create_index(self, keys, **kwargs):
+        # Record index declarations so tests can protect production index names.
+        # MongoDB itself enforces these indexes in integration/production.
+        self.index_calls.append((deepcopy(keys), deepcopy(kwargs)))
+        return kwargs.get("name", str(keys))
+
+    def update_one(self, query, update, upsert=False):
         for document in self.documents:
             if self.matches(document, query):
+                if "$inc" in update:
+                    for field, amount in update["$inc"].items():
+                        document[field] = document.get(field, 0) + amount
+                if "$setOnInsert" in update:
+                    pass
                 if "$set" in update:
                     document.update(deepcopy(update["$set"]))
-
                 return FakeUpdateResult(1)
+
+        if upsert:
+            new_document = {
+                key: deepcopy(value)
+                for key, value in query.items()
+                if not isinstance(value, dict)
+            }
+            if "$setOnInsert" in update:
+                new_document.update(deepcopy(update["$setOnInsert"]))
+            if "$inc" in update:
+                for field, amount in update["$inc"].items():
+                    new_document[field] = new_document.get(field, 0) + amount
+            if "$set" in update:
+                new_document.update(deepcopy(update["$set"]))
+            self.documents.append(new_document)
+            return FakeUpdateResult(0)
 
         return FakeUpdateResult(0)
 
@@ -105,6 +139,19 @@ class FakeCollection:
                 return FakeDeleteResult(1)
 
         return FakeDeleteResult(0)
+
+    def delete_many(self, query):
+        remaining = []
+        deleted_count = 0
+
+        for document in self.documents:
+            if self.matches(document, query):
+                deleted_count += 1
+            else:
+                remaining.append(document)
+
+        self.documents = remaining
+        return FakeDeleteResult(deleted_count)
 
 
 class FakeDatabase:
@@ -130,15 +177,37 @@ class FakeMongoClient:
 pymongo.MongoClient = FakeMongoClient
 
 from fastapi.testclient import TestClient
+import main as main_module
 from main import app, users_collection, sessions_collection, db
 
+@pytest.fixture
+def sent_otps(monkeypatch):
+    captured_otps = []
+
+    def fake_send_otp_email(email, otp, purpose):
+        captured_otps.append({
+            "email": email,
+            "otp": otp,
+            "purpose": purpose,
+        })
+
+    monkeypatch.setattr(
+        main_module,
+        "send_otp_email",
+        fake_send_otp_email
+    )
+
+    return captured_otps
 
 @pytest.fixture
-def client():
+def client(sent_otps):
     users_collection.documents.clear()
     sessions_collection.documents.clear()
     db["conversations"].documents.clear()
-
+    email_otps_collection = db["email_otps"]
+    email_otps_collection.documents.clear()
+    db["otp_ip_limits"].documents.clear()
+    
     with TestClient(
         app,
         base_url="https://testserver"
