@@ -943,6 +943,8 @@ function ProtectedRoute({ children }) {
   const [status, setStatus] = useState("checking");
 
   useEffect(() => {
+    let active = true;
+
     fetch("/api/auth/me", {
       credentials: "include",
     })
@@ -954,11 +956,15 @@ function ProtectedRoute({ children }) {
         return response.json();
       })
       .then(() => {
-        setStatus("authenticated");
+        if (active) setStatus("authenticated");
       })
       .catch(() => {
-        setStatus("unauthenticated");
+        if (active) setStatus("unauthenticated");
       });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   if (status === "checking") {
@@ -996,6 +1002,8 @@ function Chat() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef(null);
+  const chatInitializationStarted = useRef(false);
+  const [initializationAttempt, setInitializationAttempt] = useState(0);
 
   async function loadConversations() {
   try {
@@ -1151,10 +1159,11 @@ async function deleteConversation(id) {
   }, []);
 
 useEffect(() => {
-  loadConversations();
-}, []);
+  // Avoid duplicate initialization requests, including React Strict Mode's
+  // development-only effect replay.
+  if (chatInitializationStarted.current) return;
+  chatInitializationStarted.current = true;
 
-useEffect(() => {
   async function initializeChat() {
     try {
       const response = await fetch("/api/conversations", {
@@ -1208,12 +1217,14 @@ useEffect(() => {
         ]);
       }
     } catch (err) {
+      // Allow the user to retry initialization after a network or API failure.
+      chatInitializationStarted.current = false;
       setError(err.message);
     }
   }
 
   initializeChat();
-}, []);
+}, [initializationAttempt]);
 
   async function logout() {
     try {
@@ -1282,6 +1293,12 @@ useEffect(() => {
   async function send() {
     if (busy || (!input.trim() && files.length === 0)) return;
 
+    // Check for an active conversation before clearing the user's message.
+    if (!conversationId) {
+      setError("Please create a new chat first.");
+      return;
+    }
+
     const userText = input.trim();
     const selectedFiles = [...files];
 
@@ -1296,13 +1313,8 @@ useEffect(() => {
     setFiles([]);
     setBusy(true);
     setError("");
-if (!conversationId) {
-  setError("Please create a new chat first.");
-  setBusy(false);
-  return;
-}
 
-const form = new FormData();
+    const form = new FormData();
 
 form.append("conversationId", conversationId);
 form.append("model", selected);
@@ -1592,6 +1604,16 @@ form.append("message", userText);
             <div className="error">
               {error}
             </div>
+          )}
+          {!conversationId && error && (
+            <button
+              type="button"
+              className="auth-submit"
+              onClick={() => setInitializationAttempt((attempt) => attempt + 1)}
+              disabled={busy}
+            >
+              Retry loading chat
+            </button>
           )}
 
           {files.length > 0 && (
