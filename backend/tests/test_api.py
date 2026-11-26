@@ -963,3 +963,111 @@ def test_profile_name_has_maximum_length(client, sent_otps):
         json={"name": "x" * 81},
     )
     assert response.status_code == 422
+
+def test_otp_verification_endpoints_apply_ip_rate_limit(client, sent_otps, monkeypatch):
+    import main as main_module
+
+    calls = []
+
+    def record_rate_limit(request):
+        calls.append(request.url.path)
+
+    monkeypatch.setattr(
+        main_module,
+        "enforce_otp_ip_rate_limit",
+        record_rate_limit
+    )
+
+    # Test signup verification
+    client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Rate Test",
+            "email": "verify-rate@example.com",
+            "password": "password123"
+        }
+    )
+
+    calls.clear()
+
+    client.post(
+        "/api/auth/signup/verify",
+        json={
+            "email": "verify-rate@example.com",
+            "otp": "000000"
+        }
+    )
+
+    assert calls.count("/api/auth/signup/verify") == 1
+
+    # Create an account and test login verification
+    complete_signup(client, sent_otps, email="login-rate@example.com")
+
+    client.post(
+        "/api/auth/login",
+        json={
+            "email": "login-rate@example.com",
+            "password": "password123"
+        }
+    )
+
+    calls.clear()
+
+    client.post(
+        "/api/auth/login/verify",
+        json={
+            "email": "login-rate@example.com",
+            "otp": "000000"
+        }
+    )
+
+    assert calls.count("/api/auth/login/verify") == 1
+
+    # Test password reset verification
+    client.post(
+        "/api/auth/forgot-password",
+        json={"email": "login-rate@example.com"}
+    )
+
+    calls.clear()
+
+    client.post(
+        "/api/auth/reset-password",
+        json={
+            "email": "login-rate@example.com",
+            "otp": "000000",
+            "new_password": "newpassword456"
+        }
+    )
+
+    assert calls.count("/api/auth/reset-password") == 1
+
+def test_password_reset_invalidates_session_with_equal_timestamp(client, sent_otps):
+    import main as main_module
+
+    create_logged_in_user(
+        client,
+        sent_otps,
+        name="Equal Timestamp User",
+        email="equal-time@example.com"
+    )
+
+    token = client.cookies.get(main_module.SESSION_COOKIE_NAME)
+    assert token
+
+    session = main_module.sessions_collection.find_one({
+        "tokenHash": main_module.hash_session_token(token)
+    })
+    user = main_module.users_collection.find_one({"email": "equal-time@example.com"})
+    assert session is not None
+    assert user is not None
+
+    same_timestamp = session["createdAt"]
+    main_module.users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"passwordUpdatedAt": same_timestamp}}
+    )
+
+    response = client.get("/api/auth/me")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Session expired. Please sign in again."

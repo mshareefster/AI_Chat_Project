@@ -61,6 +61,12 @@ class FakeCollection:
                 if "$gt" in expected:
                     if actual is None or not actual > expected["$gt"]:
                         return False
+                elif "$lt" in expected:
+                    if actual is None or not actual < expected["$lt"]:
+                        return False
+                elif "$gte" in expected:
+                    if actual is None or not actual >= expected["$gte"]:
+                        return False
                 else:
                     return False
             elif actual != expected:

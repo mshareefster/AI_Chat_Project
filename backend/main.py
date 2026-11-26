@@ -74,8 +74,8 @@ if hasattr(users_collection, "create_index"):
         name="ttl_otp_ip_limits",
     )
 
-# OTP request throttling: 20 requests per source IP in each 15-minute window.
-# Existing per-email limits remain in place as a second layer.
+# OTP endpoint throttling: 20 combined requests per source IP in each 15-minute window.
+# This covers both OTP issuance and verification; per-email issuance limits remain a second layer.
 OTP_IP_WINDOW_SECONDS = 15 * 60
 OTP_IP_MAX_REQUESTS = 20
 TRUSTED_PROXY_IPS = {
@@ -115,7 +115,7 @@ def get_client_ip(request: Request) -> str:
 
 
 def enforce_otp_ip_rate_limit(request: Request):
-    """Apply a fixed-window per-IP limit to all OTP issuance endpoints."""
+    """Apply a fixed-window per-IP limit to OTP issuance and verification endpoints."""
     # The fake collection in unit tests has no create_index method and does
     # not emulate atomic upserts. Real MongoDB always has create_index.
     if not hasattr(otp_ip_limits_collection, "create_index"):
@@ -391,27 +391,42 @@ def verify_otp(email: str, purpose: str, otp: str, consume: bool = True):
         raise HTTPException(429, "Too many incorrect attempts. Please request a new OTP.")
 
     if not password_hash.verify(otp, otp_document["otpHash"]):
-        new_attempts = attempts + 1
-        update_fields = {"attempts": new_attempts}
-        if new_attempts >= OTP_MAX_ATTEMPTS:
-            update_fields["lockedAt"] = now
-
-        # Compare-and-set prevents simultaneous incorrect attempts from
-        # overwriting each other's attempt counter.
+        # MongoDB applies this increment atomically. Unlike reading `attempts`
+        # and writing back a calculated value, concurrent requests cannot
+        # overwrite one another or exceed the configured maximum.
         result = email_otps_collection.update_one(
             {
                 **otp_identity,
-                "attempts": attempts,
+                "attempts": {"$lt": OTP_MAX_ATTEMPTS},
                 "consumedAt": None,
                 "lockedAt": None,
+                "expiresAt": {"$gt": now},
             },
-            {"$set": update_fields}
+            {"$inc": {"attempts": 1}}
         )
         if getattr(result, "matched_count", 1) == 0:
+            current_otp = email_otps_collection.find_one(otp_identity)
+            if (
+                not current_otp
+                or current_otp.get("consumedAt") is not None
+                or current_otp.get("lockedAt") is not None
+                or int(current_otp.get("attempts", 0)) >= OTP_MAX_ATTEMPTS
+            ):
+                raise HTTPException(429, "Too many incorrect attempts. Please request a new OTP.")
             raise HTTPException(400, "OTP state changed. Please request a new OTP.")
 
-        if new_attempts >= OTP_MAX_ATTEMPTS:
+        updated_otp = email_otps_collection.find_one(otp_identity)
+        if updated_otp and int(updated_otp.get("attempts", 0)) >= OTP_MAX_ATTEMPTS:
+            email_otps_collection.update_one(
+                {
+                    **otp_identity,
+                    "attempts": {"$gte": OTP_MAX_ATTEMPTS},
+                    "consumedAt": None,
+                },
+                {"$set": {"lockedAt": now}}
+            )
             raise HTTPException(429, "Too many incorrect attempts. Please request a new OTP.")
+
         raise HTTPException(400, "Incorrect OTP. Please try again.")
 
     # Password reset first verifies the code, then claims it while the
@@ -427,6 +442,7 @@ def verify_otp(email: str, purpose: str, otp: str, consume: bool = True):
             "consumedAt": None,
             "lockedAt": None,
             "expiresAt": {"$gt": now},
+            "attempts": {"$lt": OTP_MAX_ATTEMPTS},
         },
         {"$set": {"consumedAt": now}}
     )
@@ -552,7 +568,7 @@ async def get_current_user(request: Request):
     if password_updated_at is not None:
         if session_created_at is None or (
             ensure_utc_aware(session_created_at)
-            < ensure_utc_aware(password_updated_at)
+            <= ensure_utc_aware(password_updated_at)
         ):
             raise HTTPException(401, "Session expired. Please sign in again.")
 
@@ -628,7 +644,8 @@ async def signup(data: SignupRequest, request: Request):
 
 
 @app.post("/api/auth/signup/verify")
-async def verify_signup(data: OTPVerificationRequest):
+async def verify_signup(data: OTPVerificationRequest, request: Request):
+    enforce_otp_ip_rate_limit(request)
     email = str(data.email).lower().strip()
 
     if len(data.otp) != 6 or not data.otp.isdigit():
@@ -663,6 +680,7 @@ async def verify_signup(data: OTPVerificationRequest):
             "lockedAt": None,
             "resetInProgress": None,
             "signupInProgress": None,
+            "attempts": {"$lt": OTP_MAX_ATTEMPTS},
         },
         {"$set": {"signupInProgress": signup_claim}}
     )
@@ -763,7 +781,8 @@ async def forgot_password(data: EmailRequest, request: Request):
 
 
 @app.post("/api/auth/reset-password")
-async def reset_password(data: PasswordResetRequest):
+async def reset_password(data: PasswordResetRequest, request: Request):
+    enforce_otp_ip_rate_limit(request)
     email = str(data.email).lower().strip()
 
     if len(data.otp) != 6 or not data.otp.isdigit():
@@ -802,6 +821,7 @@ async def reset_password(data: PasswordResetRequest):
             "consumedAt": None,
             "lockedAt": None,
             "resetInProgress": None,
+            "attempts": {"$lt": OTP_MAX_ATTEMPTS},
         },
         {"$set": {"resetInProgress": reset_claim}}
     )
@@ -929,7 +949,12 @@ async def login(data: LoginRequest, request: Request):
 
 
 @app.post("/api/auth/login/verify")
-async def verify_login(data: OTPVerificationRequest, response: Response):
+async def verify_login(
+    data: OTPVerificationRequest,
+    request: Request,
+    response: Response
+):
+    enforce_otp_ip_rate_limit(request)
     email = str(data.email).lower().strip()
 
     if len(data.otp) != 6 or not data.otp.isdigit():
