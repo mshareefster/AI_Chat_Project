@@ -1,4 +1,23 @@
 
+
+def test_startup_preserves_existing_production_index_names():
+    import main as main_module
+
+    def index_names(collection):
+        return {kwargs.get("name") for _, kwargs in collection.index_calls}
+
+    assert "email_1" in index_names(main_module.users_collection)
+    assert "tokenHash_1" in index_names(main_module.sessions_collection)
+    assert "expiresAt_1" in index_names(main_module.sessions_collection)
+
+    # These are new collections/indexes introduced by the OTP feature.
+    assert "unique_email_otp_purpose" in index_names(
+        main_module.email_otps_collection
+    )
+    assert "ttl_otp_ip_limits" in index_names(
+        main_module.otp_ip_limits_collection
+    )
+
 def test_health_endpoint(client):
     response = client.get("/api/health")
 

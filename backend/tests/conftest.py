@@ -51,6 +51,7 @@ class FakeCursor:
 class FakeCollection:
     def __init__(self):
         self.documents = []
+        self.index_calls = []
 
     def matches(self, document, query):
         for key, expected in query.items():
@@ -90,8 +91,9 @@ class FakeCollection:
         return FakeInsertResult(new_document["_id"])
 
     def create_index(self, keys, **kwargs):
-        # The fake records that index creation was requested. MongoDB itself
-        # enforces these indexes in integration/production environments.
+        # Record index declarations so tests can protect production index names.
+        # MongoDB itself enforces these indexes in integration/production.
+        self.index_calls.append((deepcopy(keys), deepcopy(kwargs)))
         return kwargs.get("name", str(keys))
 
     def update_one(self, query, update, upsert=False):

@@ -53,12 +53,15 @@ otp_ip_limits_collection = db["otp_ip_limits"]
 # Lightweight test doubles may omit create_index; real PyMongo collections
 # always provide it.
 if hasattr(users_collection, "create_index"):
-    users_collection.create_index("email", unique=True, name="unique_user_email")
+    # Preserve the names of existing production indexes. MongoDB can report
+    # IndexOptionsConflict when an equivalent index already exists under a
+    # different name, even when its key pattern and options are identical.
+    users_collection.create_index("email", unique=True, name="email_1")
     sessions_collection.create_index(
-        "tokenHash", unique=True, name="unique_session_token_hash"
+        "tokenHash", unique=True, name="tokenHash_1"
     )
     sessions_collection.create_index(
-        "expiresAt", expireAfterSeconds=0, name="ttl_sessions"
+        "expiresAt", expireAfterSeconds=0, name="expiresAt_1"
     )
     email_otps_collection.create_index(
         [("email", 1), ("purpose", 1)],
