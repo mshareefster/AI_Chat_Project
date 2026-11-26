@@ -1,5 +1,3 @@
-
-
 def test_startup_preserves_existing_production_index_names():
     import main as main_module
 
@@ -525,6 +523,49 @@ def test_otp_hourly_request_limit(client, sent_otps):
     assert response.json()["detail"] == (
         "Too many verification code requests. Please try again later."
     )
+
+
+def test_invalid_password_reset_otp_does_not_hash_new_password(
+    client, sent_otps, monkeypatch
+):
+    import main as main_module
+
+    email = "reset-invalid-otp@example.com"
+    complete_signup(
+        client,
+        sent_otps,
+        name="Invalid OTP User",
+        email=email,
+    )
+
+    forgot_response = client.post(
+        "/api/auth/forgot-password",
+        json={"email": email},
+    )
+    assert forgot_response.status_code == 200
+    assert sent_otps[-1]["purpose"] == "password_reset"
+
+    hash_calls = []
+
+    def track_hash(value):
+        hash_calls.append(value)
+        return "unused-test-hash"
+
+    monkeypatch.setattr(main_module.password_hash, "hash", track_hash)
+
+    response = client.post(
+        "/api/auth/reset-password",
+        json={
+            "email": email,
+            "otp": "000000" if sent_otps[-1]["otp"] != "000000" else "111111",
+            "new_password": "newpassword456",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Incorrect OTP. Please try again."
+    assert hash_calls == []
+
 
 
 def test_password_reset_invalidates_existing_sessions(client, sent_otps):

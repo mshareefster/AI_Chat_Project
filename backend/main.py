@@ -772,9 +772,9 @@ async def reset_password(data: PasswordResetRequest):
     if len(data.new_password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters.")
 
-    # Prepare the expensive password hash before claiming the OTP.
-    new_password_hash = password_hash.hash(data.new_password)
-
+    # Validate the OTP before doing expensive password hashing.
+    # The atomic claim below is acquired before hashing so concurrent requests
+    # cannot repeatedly consume CPU with the same valid OTP.
     otp_document = verify_otp(
         email,
         "password_reset",
@@ -812,6 +812,10 @@ async def reset_password(data: PasswordResetRequest):
         )
 
     try:
+        # Hash only after the OTP is verified and atomically claimed. If hashing
+        # fails, the exception handler releases the claim for a safe retry.
+        new_password_hash = password_hash.hash(data.new_password)
+
         # Update the password first. get_current_user() rejects sessions
         # created before passwordUpdatedAt, so all old sessions are logically
         # revoked as soon as this single-document user update succeeds.
@@ -859,7 +863,7 @@ async def reset_password(data: PasswordResetRequest):
                 f"{type(release_exc).__name__}"
             )
 
-        print(f"WARNING: Password reset database operation failed: {type(exc).__name__}")
+        print(f"WARNING: Password reset operation failed: {type(exc).__name__}")
         raise HTTPException(
             503,
             "Unable to complete the password reset. Please try again."
