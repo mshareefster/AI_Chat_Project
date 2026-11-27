@@ -122,7 +122,7 @@ Expected:
 
 Create an A record:
 
-`chat.hudamusthafa.tech` -> your EC2 public/Elastic IP
+`YOUR DOMAIN -> your EC2 public/Elastic IP
 
 Then add HTTPS with Certbot after HTTP is working.
 
