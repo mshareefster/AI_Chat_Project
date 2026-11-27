@@ -169,7 +169,7 @@ def send_otp_email(email: str, otp: str, purpose: str):
     smtp_username = os.getenv("SMTP_USERNAME")
     smtp_password = os.getenv("SMTP_PASSWORD")
     from_email = os.getenv("SMTP_FROM_EMAIL")
-    from_name = os.getenv("SMTP_FROM_NAME", "Huda AI")
+    from_name = os.getenv("SMTP_FROM_NAME", "MS Tech Innovations")
 
     if not all([
         smtp_host,
@@ -180,11 +180,11 @@ def send_otp_email(email: str, otp: str, purpose: str):
         raise RuntimeError("SMTP configuration is incomplete.")
 
     if purpose == "signup":
-        subject = "Verify your Huda AI account"
+        subject = "Verify your MS Tech Innovations account"
     elif purpose == "password_reset":
-        subject = "Reset your Huda AI password"
+        subject = "Reset your MS Tech Innovations password"
     else:
-        subject = "Your Huda AI login verification code"
+        subject = "Your MS Tech Innovations login verification code"
 
     message = EmailMessage()
     message["Subject"] = subject
@@ -194,7 +194,7 @@ def send_otp_email(email: str, otp: str, purpose: str):
     message.set_content(
         f"""Hello,
 
-Your Huda AI verification code is:
+Your MS Tech Innovations verification code is:
 
 {otp}
 
@@ -203,7 +203,7 @@ This code expires in {OTP_EXPIRY_MINUTES} minutes.
 If you did not request this code, please ignore this email.
 
 Regards,
-Huda AI Team
+MS Tech Innovations Team
 """
     )
 
@@ -454,7 +454,7 @@ def verify_otp(email: str, purpose: str, otp: str, consume: bool = True):
 if not API_BASE_URL or not API_KEY:
     print("WARNING: AI_API_BASE_URL or AI_API_KEY is not configured.")
 
-app = FastAPI(title="Huda AI Chat API")
+app = FastAPI(title="MS Tech Innovations Chat API")
 
 # Keep the API same-origin in production. Add any additional trusted frontend
 # origins through CORS_ORIGINS as a comma-separated environment variable.
