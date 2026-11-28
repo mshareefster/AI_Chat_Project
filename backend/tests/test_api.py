@@ -117,21 +117,11 @@ def create_logged_in_user(
     )
 
     assert login_response.status_code == 200
+    assert login_response.json()["message"] == "Login successful."
+    assert "huda_session" in login_response.cookies
+    assert client.get("/api/auth/me").status_code == 200
 
-    otp = sent_otps[-1]["otp"]
-
-    verify_response = client.post(
-        "/api/auth/login/verify",
-        json={
-            "email": email,
-            "otp": otp
-        }
-    )
-
-    assert verify_response.status_code == 200
-    assert "huda_session" in verify_response.cookies
-
-    return verify_response
+    return login_response
 
 
 def test_signup_success(client, sent_otps):
@@ -252,50 +242,40 @@ def test_signup_wrong_otp(client, sent_otps):
     assert response.json()["detail"] == "Incorrect OTP. Please try again."
 
 
-def test_login_success(client, sent_otps):
+def test_login_success_without_otp(client, sent_otps):
     complete_signup(client, sent_otps)
+    otp_count_before_login = len(sent_otps)
 
     response = client.post(
         "/api/auth/login",
-        json={
-            "email": "test@example.com",
-            "password": "password123"
-        }
+        json={"email": "test@example.com", "password": "password123"}
     )
 
     assert response.status_code == 200
-    assert response.json()["message"] == "Login verification OTP sent to your email."
-    assert "huda_session" not in response.cookies
+    assert response.json()["message"] == "Login successful."
+    assert "huda_session" in response.cookies
+    assert len(sent_otps) == otp_count_before_login
+    assert client.get("/api/auth/me").status_code == 200
 
-    verify_response = client.post(
+
+def test_login_otp_verification_endpoint_is_disabled(client, sent_otps):
+    complete_signup(client, sent_otps)
+    response = client.post(
         "/api/auth/login/verify",
-        json={
-            "email": "test@example.com",
-            "otp": sent_otps[-1]["otp"]
-        }
+        json={"email": "test@example.com", "otp": "123456"}
     )
-
-    assert verify_response.status_code == 200
-    assert verify_response.json()["message"] == "Login successful."
-    assert "huda_session" in verify_response.cookies
+    assert response.status_code == 410
 
 
-def test_login_without_otp_does_not_create_session(client, sent_otps):
+def test_login_does_not_create_otp_record(client, sent_otps):
     complete_signup(client, sent_otps)
-
+    from main import email_otps_collection
     response = client.post(
         "/api/auth/login",
-        json={
-            "email": "test@example.com",
-            "password": "password123"
-        }
+        json={"email": "test@example.com", "password": "password123"}
     )
-
     assert response.status_code == 200
-
-    me_response = client.get("/api/auth/me")
-
-    assert me_response.status_code == 401
+    assert email_otps_collection.find_one({"email": "test@example.com", "purpose": "login"}) is None
 
 
 def test_login_wrong_password(client, sent_otps):
@@ -313,30 +293,14 @@ def test_login_wrong_password(client, sent_otps):
     assert response.json()["detail"] == "Invalid email or password."
 
 
-def test_login_wrong_otp(client, sent_otps):
+def test_login_otp_verification_is_rejected(client, sent_otps):
     complete_signup(client, sent_otps)
-
-    client.post(
-        "/api/auth/login",
-        json={
-            "email": "test@example.com",
-            "password": "password123"
-        }
-    )
-
     response = client.post(
         "/api/auth/login/verify",
-        json={
-            "email": "test@example.com",
-            "otp": "000000"
-        }
+        json={"email": "test@example.com", "otp": "000000"}
     )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Incorrect OTP. Please try again."
-
-    me_response = client.get("/api/auth/me")
-    assert me_response.status_code == 401
+    assert response.status_code == 410
+    assert client.get("/api/auth/me").status_code == 401
 
 
 def test_session_validation_after_login(client, sent_otps):
@@ -418,31 +382,13 @@ def test_otp_requires_six_digits(client, sent_otps):
 
 
 
-def test_verified_login_otp_cannot_be_reused(client, sent_otps):
+def test_login_otp_cannot_authenticate(client, sent_otps):
     complete_signup(client, sent_otps)
-
-    client.post(
-        "/api/auth/login",
-        json={
-            "email": "test@example.com",
-            "password": "password123"
-        }
-    )
-    otp = sent_otps[-1]["otp"]
-
-    first_verification = client.post(
+    response = client.post(
         "/api/auth/login/verify",
-        json={"email": "test@example.com", "otp": otp}
+        json={"email": "test@example.com", "otp": "123456"}
     )
-    assert first_verification.status_code == 200
-
-    client.post("/api/auth/logout")
-
-    reused_verification = client.post(
-        "/api/auth/login/verify",
-        json={"email": "test@example.com", "otp": otp}
-    )
-    assert reused_verification.status_code in (400, 429)
+    assert response.status_code == 410
     assert client.get("/api/auth/me").status_code == 401
 
 
@@ -1000,28 +946,7 @@ def test_otp_verification_endpoints_apply_ip_rate_limit(client, sent_otps, monke
 
     assert calls.count("/api/auth/signup/verify") == 1
 
-    # Create an account and test login verification
-    complete_signup(client, sent_otps, email="login-rate@example.com")
-
-    client.post(
-        "/api/auth/login",
-        json={
-            "email": "login-rate@example.com",
-            "password": "password123"
-        }
-    )
-
-    calls.clear()
-
-    client.post(
-        "/api/auth/login/verify",
-        json={
-            "email": "login-rate@example.com",
-            "otp": "000000"
-        }
-    )
-
-    assert calls.count("/api/auth/login/verify") == 1
+    # Login uses email/password directly and has no OTP verification endpoint.
 
     # Test password reset verification
     client.post(

@@ -27,35 +27,58 @@ const FALLBACK_MODELS = [
   "zai/glm-5.3-flash",
 ];
 
+function PasswordInput({ value, onChange, ...props }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div style={{ position: "relative", width: "100%" }}>
+      <input
+        {...props}
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={onChange}
+        style={{ ...props.style, paddingRight: "3.2rem", width: "100%", boxSizing: "border-box" }}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((current) => !current)}
+        aria-label={visible ? "Hide password" : "Show password"}
+        title={visible ? "Hide password" : "Show password"}
+        style={{
+          position: "absolute", right: "0.65rem", top: "50%", transform: "translateY(-50%)",
+          border: 0, background: "transparent", padding: "0.25rem", cursor: "pointer",
+          color: "inherit", display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+      >
+        {visible ? (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 002.8 2.8" />
+            <path d="M9.9 5.2A10.8 10.8 0 0112 5c5 0 8.5 4.5 9.5 7-.4 1-1.2 2.2-2.4 3.3" />
+            <path d="M6.2 6.2C3.9 7.7 2.8 9.8 2.5 12c1 2.5 4.5 7 9.5 7 1 0 2-.2 2.9-.5" />
+          </svg>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M2.5 12s3.5-7 9.5-7 9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
 /* =========================
    LOGIN PAGE
 ========================= */
 
 function Login() {
   const navigate = useNavigate();
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
-  const [otpStep, setOtpStep] = useState(false);
-  const [resendCountdown, setResendCountdown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-
-  useEffect(() => {
-    if (resendCountdown <= 0) return;
-
-    const timer = setTimeout(() => {
-      setResendCountdown((current) => Math.max(0, current - 1));
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [resendCountdown]);
 
   async function handleLogin(e) {
     e.preventDefault();
-
     if (!email.trim() || !password) {
       setError("Please enter your email and password.");
       return;
@@ -63,69 +86,15 @@ function Login() {
 
     setBusy(true);
     setError("");
-    setSuccess("");
-
     try {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          password,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
       });
-
       const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Login failed.");
-      }
-
-      setOtpStep(true);
-      setOtp("");
-      setResendCountdown(60);
-      setSuccess("A verification code has been sent to your email.");
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleVerifyOtp(e) {
-    e.preventDefault();
-
-    if (!/^\d{6}$/.test(otp)) {
-      setError("Please enter the 6-digit verification code.");
-      return;
-    }
-
-    setBusy(true);
-    setError("");
-    setSuccess("");
-
-    try {
-      const response = await fetch("/api/auth/login/verify", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          otp,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "OTP verification failed.");
-      }
-
+      if (!response.ok) throw new Error(data.detail || "Login failed.");
       navigate("/chat");
     } catch (err) {
       setError(err.message);
@@ -134,165 +103,58 @@ function Login() {
     }
   }
 
-  async function handleResendOtp() {
-    if (resendCountdown > 0 || busy) return;
-
-    setBusy(true);
-    setError("");
-    setSuccess("");
-
-    try {
-      const response = await fetch("/api/auth/otp/resend", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          purpose: "login",
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Could not resend the verification code.");
-      }
-
-      setOtp("");
-      setResendCountdown(60);
-      setSuccess("A new verification code has been sent.");
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function changeEmail() {
-    setOtpStep(false);
-    setOtp("");
-    setError("");
-    setSuccess("");
-    setResendCountdown(0);
-  }
-
   return (
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
           <img src="/hai-logo.png" alt="HAi logo" />
         </div>
-
         <div className="auth-heading">
-          <h1>{otpStep ? "Verify your email" : "Welcome back"}</h1>
-          <p>
-            {otpStep
-              ? `Enter the 6-digit code sent to ${email}.`
-              : "Sign in to continue to your AI workspace."}
-          </p>
+          <h1>Welcome back</h1>
+          <p>Sign in to continue to your AI workspace.</p>
         </div>
-
-        {!otpStep ? (
-          <form onSubmit={handleLogin} className="auth-form">
-            <label>
-              Email
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                autoComplete="email"
-                required
-              />
-            </label>
-
-            <label>
-              Password
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                autoComplete="current-password"
-                required
-              />
-            </label>
-
-            {error && <div className="auth-error">{error}</div>}
-
-            <button className="auth-submit" disabled={busy}>
-              {busy ? "Signing in..." : "Continue"}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleVerifyOtp} className="auth-form">
-            <label>
-              Verification code
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={otp}
-                onChange={(e) =>
-                  setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
-                }
-                placeholder="Enter 6-digit code"
-                maxLength={6}
-                required
-              />
-            </label>
-
-            {error && <div className="auth-error">{error}</div>}
-            {success && <div className="auth-success">{success}</div>}
-
-            <button className="auth-submit" disabled={busy || otp.length !== 6}>
-              {busy ? "Verifying..." : "Verify and sign in"}
-            </button>
-
-            <div className="auth-links">
-              <button
-                type="button"
-                onClick={handleResendOtp}
-                disabled={busy || resendCountdown > 0}
-              >
-                {resendCountdown > 0
-                  ? `Resend code in ${resendCountdown}s`
-                  : "Resend verification code"}
-              </button>
-              <button type="button" onClick={changeEmail} disabled={busy}>
-                Use a different email
-              </button>
-            </div>
-          </form>
-        )}
-
-        {!otpStep && (
-          <>
-            <div className="auth-links">
-              <Link to="/forgot-password">Forgot password?</Link>
-            </div>
-
-            <div className="auth-divider">
-              <span>OR</span>
-            </div>
-
-            <button
-              type="button"
-              className="google-button"
-              onClick={() => setError("Google Sign-In will be added next.")}
-            >
-              <span className="google-icon">G</span>
-              Continue with Google
-            </button>
-
-            <p className="auth-footer">
-              Don't have an account?{" "}
-              <Link to="/signup">Create account</Link>
-            </p>
-          </>
-        )}
+        <form onSubmit={handleLogin} className="auth-form">
+          <label>
+            Email
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              autoComplete="email"
+              required
+            />
+          </label>
+          <label>
+            Password
+            <PasswordInput
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              autoComplete="current-password"
+              required
+            />
+          </label>
+          {error && <div className="auth-error">{error}</div>}
+          <button className="auth-submit" disabled={busy}>
+            {busy ? "Signing in..." : "Sign in"}
+          </button>
+        </form>
+        <div className="auth-links">
+          <Link to="/forgot-password">Forgot password?</Link>
+        </div>
+        <div className="auth-divider"><span>OR</span></div>
+        <button
+          type="button"
+          className="google-button"
+          onClick={() => setError("Google Sign-In will be added next.")}
+        >
+          <span className="google-icon">G</span>
+          Continue with Google
+        </button>
+        <p className="auth-footer">
+          Don't have an account? <Link to="/signup">Create account</Link>
+        </p>
       </div>
     </div>
   );
@@ -504,8 +366,7 @@ function Signup() {
 
             <label>
               Password
-              <input
-                type="password"
+              <PasswordInput
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="At least 8 characters"
@@ -754,8 +615,7 @@ function ForgotPassword() {
             </label>
             <label>
               New password
-              <input
-                type="password"
+              <PasswordInput
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="At least 8 characters"
@@ -765,8 +625,7 @@ function ForgotPassword() {
             </label>
             <label>
               Confirm new password
-              <input
-                type="password"
+              <PasswordInput
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Re-enter your new password"

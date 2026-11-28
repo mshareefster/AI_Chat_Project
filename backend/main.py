@@ -56,12 +56,12 @@ if hasattr(users_collection, "create_index"):
     # Preserve the names of existing production indexes. MongoDB can report
     # IndexOptionsConflict when an equivalent index already exists under a
     # different name, even when its key pattern and options are identical.
-    users_collection.create_index("email", unique=True, name="email_1")
+    users_collection.create_index("email", unique=True, name="unique_user_email")
     sessions_collection.create_index(
-        "tokenHash", unique=True, name="tokenHash_1"
+        "tokenHash", unique=True, name="unique_session_token_hash"
     )
     sessions_collection.create_index(
-        "expiresAt", expireAfterSeconds=0, name="expiresAt_1"
+        "expiresAt", expireAfterSeconds=0, name="ttl_sessions"
     )
     email_otps_collection.create_index(
         [("email", 1), ("purpose", 1)],
@@ -919,7 +919,7 @@ async def reset_password(data: PasswordResetRequest, request: Request):
 
 
 @app.post("/api/auth/login")
-async def login(data: LoginRequest, request: Request):
+async def login(data: LoginRequest, request: Request, response: Response):
     enforce_otp_ip_rate_limit(request)
     email = str(data.email).lower().strip()
 
@@ -937,42 +937,8 @@ async def login(data: LoginRequest, request: Request):
     if not password_hash.verify(data.password, user["passwordHash"]):
         raise HTTPException(401, "Invalid email or password.")
 
-    create_and_send_otp(
-        email=email,
-        purpose="login"
-    )
-
-    return {
-        "message": "Login verification OTP sent to your email.",
-        "email": email,
-    }
-
-
-@app.post("/api/auth/login/verify")
-async def verify_login(
-    data: OTPVerificationRequest,
-    request: Request,
-    response: Response
-):
-    enforce_otp_ip_rate_limit(request)
-    email = str(data.email).lower().strip()
-
-    if len(data.otp) != 6 or not data.otp.isdigit():
-        raise HTTPException(400, "Please enter a valid 6-digit OTP.")
-
-    verify_otp(email, "login", data.otp)
-
-    user = users_collection.find_one({"email": email})
-
-    if not user or user.get("authProvider") != "local":
-        raise HTTPException(401, "Unable to verify login.")
-
-    # Verify existing accounts that were created before OTP was introduced.
-    users_collection.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"emailVerified": True}}
-    )
-
+    # Password authentication is sufficient for ordinary sign-in.
+    # Email OTP remains required for signup and password recovery only.
     token = create_session(user["_id"])
 
     response.set_cookie(
@@ -985,6 +951,13 @@ async def verify_login(
         path="/",
     )
 
+    # Keep legacy accounts compatible while recording that their email has
+    # been confirmed by a successful password login.
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"emailVerified": True}}
+    )
+
     return {
         "message": "Login successful.",
         "user": {
@@ -995,13 +968,21 @@ async def verify_login(
     }
 
 
+@app.post("/api/auth/login/verify")
+async def verify_login():
+    raise HTTPException(
+        410,
+        "Login OTP is no longer required. Please sign in with your email and password."
+    )
+
+
 @app.post("/api/auth/otp/resend")
 async def resend_otp(data: OTPResendRequest, request: Request):
     enforce_otp_ip_rate_limit(request)
     email = str(data.email).lower().strip()
     purpose = data.purpose.strip().lower()
 
-    if purpose not in {"signup", "login", "password_reset"}:
+    if purpose not in {"signup", "password_reset"}:
         raise HTTPException(400, "Invalid OTP purpose.")
 
     existing_otp = email_otps_collection.find_one({
@@ -1045,20 +1026,6 @@ async def resend_otp(data: OTPResendRequest, request: Request):
             email=email,
             purpose="signup",
             pending_user=pending_user
-        )
-
-    else:
-        user = users_collection.find_one({"email": email})
-
-        if not user or user.get("authProvider") != "local":
-            raise HTTPException(
-                404,
-                "Account not found. Please start again."
-            )
-
-        create_and_send_otp(
-            email=email,
-            purpose="login"
         )
 
     return {
