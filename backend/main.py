@@ -47,32 +47,66 @@ sessions_collection = db["sessions"]
 email_otps_collection = db["email_otps"]
 otp_ip_limits_collection = db["otp_ip_limits"]
 
-# Security indexes are mandatory when using real MongoDB. If index creation
-# fails (for example, because duplicate legacy records exist), fail startup
-# instead of silently running without the protections.
-# Lightweight test doubles may omit create_index; real PyMongo collections
-# always provide it.
+# Security indexes are mandatory when using real MongoDB. Existing equivalent
+# indexes are preserved even when production uses a different index name.
+# If an existing index has the same key pattern but incompatible options,
+# MongoDB will reject the attempted creation and startup will fail safely.
+def ensure_index(collection, key, expected_name, **options):
+    """Create an index only when an equivalent index does not already exist."""
+    expected_keys = [(key, 1)] if isinstance(key, str) else list(key)
+
+    # Real PyMongo collections support list_indexes(). Lightweight test doubles
+    # may not, so retain create_index behavior for those test doubles.
+    if hasattr(collection, "list_indexes"):
+        for index in collection.list_indexes():
+            existing_keys = list(index["key"].items())
+
+            if (
+                existing_keys == expected_keys
+                and all(index.get(option) == value
+                        for option, value in options.items())
+            ):
+                return index["name"]
+
+    return collection.create_index(
+        key,
+        name=expected_name,
+        **options
+    )
+
+
 if hasattr(users_collection, "create_index"):
-    # Preserve the names of existing production indexes. MongoDB can report
-    # IndexOptionsConflict when an equivalent index already exists under a
-    # different name, even when its key pattern and options are identical.
-    users_collection.create_index("email", unique=True, name="unique_user_email")
-    sessions_collection.create_index(
-        "tokenHash", unique=True, name="unique_session_token_hash"
+    ensure_index(
+        users_collection,
+        "email",
+        "unique_user_email",
+        unique=True
     )
-    sessions_collection.create_index(
-        "expiresAt", expireAfterSeconds=0, name="ttl_sessions"
+    ensure_index(
+        sessions_collection,
+        "tokenHash",
+        "unique_session_token_hash",
+        unique=True
     )
-    email_otps_collection.create_index(
-        [("email", 1), ("purpose", 1)],
-        unique=True,
-        name="unique_email_otp_purpose",
-    )
-    otp_ip_limits_collection.create_index(
+    ensure_index(
+        sessions_collection,
         "expiresAt",
-        expireAfterSeconds=0,
-        name="ttl_otp_ip_limits",
+        "ttl_sessions",
+        expireAfterSeconds=0
     )
+    ensure_index(
+        email_otps_collection,
+        [("email", 1), ("purpose", 1)],
+        "unique_email_otp_purpose",
+        unique=True
+    )
+    ensure_index(
+        otp_ip_limits_collection,
+        "expiresAt",
+        "ttl_otp_ip_limits",
+        expireAfterSeconds=0
+    )
+
 
 # OTP endpoint throttling: 20 combined requests per source IP in each 15-minute window.
 # This covers both OTP issuance and verification; per-email issuance limits remain a second layer.
